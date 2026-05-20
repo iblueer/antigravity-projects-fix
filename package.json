@@ -14,13 +14,20 @@
   "keywords": [
     "antigravity",
     "google-antigravity",
+    "antigravity-2",
+    "antigravity-ide",
+    "google-gemini",
+    "gemini",
+    "ai-ide",
     "projects",
     "workspace",
     "duplicate",
+    "duplicate-projects",
     "deduplicate",
+    "consolidate",
+    "merge",
     "cleanup",
-    "cli",
-    "gemini"
+    "cli"
   ],
   "engines": {
     "node": ">=16.7.0"
