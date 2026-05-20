@@ -6,6 +6,7 @@
 
 When one project folder shows up in the sidebar as `MyApp`, `MyApp 2`, `MyApp 3` … all the way to `MyApp 41`, this tool collapses them back to a single, tidy entry.
 
+[![npm version](https://img.shields.io/npm/v/antigravity-projects-fix.svg)](https://www.npmjs.com/package/antigravity-projects-fix)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A5%2016.7-43853d.svg)](https://nodejs.org)
 [![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](package.json)
@@ -139,23 +140,38 @@ or `purge --apply` for a clean slate.
 
 ## 📦 Installation
 
-Requires **Node.js ≥ 16.7** (for `fs.cpSync`). No `npm install` needed.
+Requires **Node.js ≥ 16.7** (for `fs.cpSync`). **No install needed** — `npx`
+fetches and runs it in one step.
 
 ```bash
-# Option A — clone and run
+# Recommended — run without installing anything
+npx antigravity-projects-fix scan
+```
+
+<details>
+<summary>Other ways to run it</summary>
+
+```bash
+# Install globally, then use the `agfix` / `antigravity-projects-fix` command
+npm install -g antigravity-projects-fix
+agfix scan
+
+# Or clone the repo and run the file directly
 git clone https://github.com/ryukenshin546-a11y/antigravity-projects-fix.git
 cd antigravity-projects-fix
 node index.js scan
-
-# Option B — run without cloning
-npx antigravity-projects-fix scan
 ```
+
+</details>
 
 ## 🚀 Usage
 
 ```text
-antigravity-projects-fix <command> [options]
+npx antigravity-projects-fix <command> [options]
 ```
+
+> The examples below use `npx antigravity-projects-fix`. If you cloned the repo
+> instead, just swap that for `node index.js` — every command is identical.
 
 ### Which command should I use?
 
@@ -187,7 +203,7 @@ project. This mode fixes that: one screen, tick everything you want gone, keep t
 rest, apply once.
 
 ```bash
-node index.js interactive
+npx antigravity-projects-fix interactive
 ```
 
 <div align="center">
@@ -221,22 +237,22 @@ and a backup is always made first.
 
 ```bash
 # Pick exactly what to delete in a checkbox UI (recommended)
-node index.js interactive
+npx antigravity-projects-fix interactive
 
 # 1. See what's going on (read-only, changes nothing)
-node index.js scan
+npx antigravity-projects-fix scan
 
 # 2. Preview the consolidation
-node index.js consolidate
+npx antigravity-projects-fix consolidate
 
 # 3. Collapse duplicates to one entry per folder (backs up first)
-node index.js consolidate --apply
+npx antigravity-projects-fix consolidate --apply
 
 # 4. Nuke every project entry, no prompt
-node index.js purge --apply --yes
+npx antigravity-projects-fix purge --apply --yes
 
 # 5. Undo — restore from a backup
-node index.js restore ~/.gemini/config/projects.backup-2026-05-20_06-32-10
+npx antigravity-projects-fix restore ~/.gemini/config/projects.backup-2026-05-20_06-32-10
 ```
 
 ## 📍 Where are the files? (auto-detect)
@@ -266,10 +282,10 @@ and uses the **first one that actually contains project files** (a `.json` with 
 - You can always **skip detection** with `--dir`:
 
   ```bash
-  node index.js scan --dir "/custom/path/.gemini/config/projects"
+  npx antigravity-projects-fix scan --dir "/custom/path/.gemini/config/projects"
   ```
 
-> 💡 Not sure where yours is? Run `node index.js scan` first — it either finds it
+> 💡 Not sure where yours is? Run `npx antigravity-projects-fix scan` first — it either finds it
 > or shows you the list of places it looked.
 
 ## ✅ The result
@@ -339,7 +355,7 @@ re‑synced from the server. In that case you can:
 ## ❓ FAQ
 
 **How do I remove duplicate projects in Google Antigravity 2.0?**
-Run `node index.js scan` to see the duplicates, then `node index.js consolidate --apply`
+Run `npx antigravity-projects-fix scan` to see the duplicates, then `npx antigravity-projects-fix consolidate --apply`
 to keep one entry per folder. A backup is made automatically. See [Usage](#-usage).
 
 **Why does my Antigravity sidebar show the same project many times (`MyApp 2`, `MyApp 3` …)?**
@@ -353,7 +369,7 @@ code and your conversation history are never touched, every destructive action i
 dry‑run by default, and a full backup is made before anything is deleted. See [Safety](#-safety).
 
 **Can I undo it?**
-Yes — `node index.js restore <backup-dir>` restores from the automatic backup.
+Yes — `npx antigravity-projects-fix restore <backup-dir>` restores from the automatic backup.
 
 **It says "No projects folder found" but I have the bug — what now?**
 Your install may live in a non-default location. The tool [auto-detects](#-where-are-the-files-auto-detect)
