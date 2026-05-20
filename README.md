@@ -28,6 +28,7 @@ When one project folder shows up in the sidebar as `MyApp`, `MyApp 2`, `MyApp 3`
 - [The solution](#-the-solution)
 - [Installation](#-installation)
 - [Usage](#-usage)
+- [Where are the files? (auto-detect)](#-where-are-the-files-auto-detect)
 - [The result](#-the-result)
 - [Safety](#-safety)
 - [Will the duplicates come back? (cloud sync)](#-will-the-duplicates-come-back-cloud-sync)
@@ -210,7 +211,7 @@ and a backup is always made first.
 | `-y, --yes`     | Skip the confirmation prompt                                           |
 | `--no-backup`   | Do not create a backup before deleting                                |
 | `--force`       | Skip the "is Antigravity running?" safety check                       |
-| `--dir <path>`  | Override the projects folder (default `~/.gemini/config/projects`)    |
+| `--dir <path>`  | Override the projects folder (otherwise it's [auto-detected](#-where-are-the-files-auto-detect)) |
 | `--no-color`    | Disable colored output                                                |
 | `-h, --help`    | Show help                                                             |
 | `-v, --version` | Show version                                                          |
@@ -236,6 +237,39 @@ node index.js purge --apply --yes
 # 5. Undo — restore from a backup
 node index.js restore ~/.gemini/config/projects.backup-2026-05-20_06-32-10
 ```
+
+## 📍 Where are the files? (auto-detect)
+
+The project registry **isn't in the same place on every machine.** Its location
+depends on your OS, your Antigravity version, environment overrides, and where
+Electron put its user-data directory. Hard-coding one path would make the tool
+report *"no projects found"* on a perfectly affected machine — so instead it
+**auto-detects.**
+
+On startup (when you don't pass `--dir`) it probes these locations **in order**
+and uses the **first one that actually contains project files** (a `.json` with a
+`folderUri` inside):
+
+| Order | Location                                                      | When it applies        |
+| ----- | ------------------------------------------------------------ | ---------------------- |
+| 1     | `$GEMINI_HOME/config/projects`                               | explicit env override  |
+| 2     | `~/.gemini/config/projects`                                  | current default        |
+| 3     | `$XDG_CONFIG_HOME/gemini/config/projects` · `~/.config/gemini/config/projects` | Linux            |
+| 4     | `%APPDATA%\Antigravity\config\projects` · `%LOCALAPPDATA%\…` | Windows (Electron)     |
+| 5     | `~/Library/Application Support/Antigravity/config/projects`  | macOS                  |
+
+- If detection lands somewhere **other than the default**, the tool prints
+  `Using detected projects folder: …` so you can see exactly what it's touching.
+- If **nothing** matches, it **lists every path it checked** and tells you to
+  point `--dir` at the right one — it never fails silently.
+- You can always **skip detection** with `--dir`:
+
+  ```bash
+  node index.js scan --dir "/custom/path/.gemini/config/projects"
+  ```
+
+> 💡 Not sure where yours is? Run `node index.js scan` first — it either finds it
+> or shows you the list of places it looked.
 
 ## ✅ The result
 
@@ -268,8 +302,14 @@ This tool is built to be hard to misuse:
   you add `--apply`.
 - **Automatic backup** — before deleting, the whole `projects` folder is copied to
   `projects.backup-<timestamp>` right next to it (skip with `--no-backup`).
+- **Backup must succeed first** — if the backup can't be written (disk full,
+  permissions), the tool **aborts before deleting anything** rather than risk
+  unprotected data.
 - **Won't fight the app** — it refuses to run while `Antigravity` is detected as
   running (override with `--force`). **Close Antigravity first.**
+- **Won't touch the wrong folder** — auto-detection only picks a directory that
+  actually contains project files, and `--dir` is validated (it must be a real
+  directory). Malformed JSON files are reported and skipped, never guessed at.
 - **Fully reversible** — `restore <backup-dir>` puts everything back.
 - **Offline** — it only touches local files and never makes a network request.
 
