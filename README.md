@@ -65,6 +65,13 @@ No installer, no npm packages, no network calls. One file, runs anywhere Node ru
 
 > ℹ️ Unofficial community project. **Not affiliated with Google LLC.**
 
+> ⚠️ **Platform support — please read.** This has been **tested on Windows only.**
+> macOS (Apple Silicon **and** Intel) and Linux are supported in the code but are
+> **not yet tested on real hardware.** If you're on a Mac, please be careful:
+> run `scan` first (read‑only, changes nothing), and keep the **automatic backup**
+> so you can `restore` if anything looks wrong. Reports from macOS/Linux are very
+> welcome — see [Discussions](https://github.com/ryukenshin546-a11y/antigravity-projects-fix/discussions).
+
 ## 🐛 The problem
 
 After the 2.0 update, the Projects panel looks like this:
@@ -283,9 +290,10 @@ re‑synced from the server. In that case you can:
   after `consolidate` a few old conversations may not appear grouped under the
   surviving project. **Your conversation data itself** (in
   `~/.gemini/antigravity/conversations`) **is never touched.**
-- Developed and tested on **Windows**. The paths and the process check also target
-  macOS/Linux (`~/.gemini`, `pgrep`) — please open an issue if anything is off on
-  your OS.
+- **Tested on Windows only.** macOS (Apple Silicon & Intel) and Linux use the same
+  code paths (`~/.gemini`, `pgrep`) and *should* work — but they are **unverified on
+  real hardware.** On those systems, treat it as experimental: run `scan` first,
+  rely on the automatic backup, and please report results in an issue or discussion.
 
 ## 🤝 Contributing & feedback
 
