@@ -199,12 +199,15 @@ function backup(dir) {
   try {
     fs.cpSync(dir, dest, { recursive: true });
   } catch (e) {
-    // Surface as a clear error with recovery hint instead of a raw exception.
-    throw new Error(
+    // Surface as a clear, user-facing error (no stack trace) with a recovery
+    // hint instead of a raw exception.
+    const err = new Error(
       `Backup failed: ${e.message}\n` +
       `  The backup was not created — aborting to protect your data.\n` +
       `  Fix the issue above, or re-run with --no-backup if you're sure.`
     );
+    err.expected = true;
+    throw err;
   }
   return dest;
 }
@@ -669,6 +672,13 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error(red('Error: ' + (e && e.stack ? e.stack : e)));
+  // Expected errors (e.g. backup failure) show only the friendly message.
+  // Unexpected errors show the stack so issues can be reported.
+  if (e && e.expected) {
+    console.error('\n  ' + red(e.message) + '\n');
+  } else {
+    console.error(red('\n  Unexpected error: ' + (e && e.stack ? e.stack : e)));
+    console.error(dim('  Please report this at the project Issues page.\n'));
+  }
   process.exit(1);
 });
