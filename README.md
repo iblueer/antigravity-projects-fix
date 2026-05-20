@@ -241,6 +241,10 @@ npx antigravity-projects-fix merge
 npx antigravity-projects-fix merge --apply
 ```
 
+<div align="center">
+<img src="assets/merge-terminal.svg" alt="Terminal output of the merge command: re-pointing 47 chats to their keeper project and removing 53 duplicates, with chats never deleted" width="80%"/>
+</div>
+
 How it works, and why it's safe:
 
 - Each chat is a separate database in `~/.gemini/antigravity/conversations`. The

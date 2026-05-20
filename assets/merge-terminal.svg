@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="430" viewBox="0 0 760 430" font-family="'Cascadia Code','Consolas',monospace">
+  <rect width="760" height="430" rx="10" fill="#0c0c0e"/>
+  <!-- title bar -->
+  <rect width="760" height="36" rx="10" fill="#1a1b1e"/>
+  <rect y="20" width="760" height="16" fill="#1a1b1e"/>
+  <circle cx="22" cy="18" r="6" fill="#ff5f56"/>
+  <circle cx="42" cy="18" r="6" fill="#ffbd2e"/>
+  <circle cx="62" cy="18" r="6" fill="#27c93f"/>
+  <text x="380" y="23" fill="#6b7075" font-size="12" text-anchor="middle">antigravity-projects-fix — merge</text>
+
+  <g font-size="13.5">
+    <text x="20" y="68" fill="#7ee29a">$ <tspan fill="#d6d8da">node index.js merge --apply</tspan></text>
+
+    <text x="20" y="98" fill="#d6d8da">  <tspan font-weight="700">58</tspan> project files  →  <tspan font-weight="700">5</tspan> real folder(s)  →  <tspan fill="#ff6b6b" font-weight="700">53 duplicate(s)</tspan></text>
+
+    <text x="20" y="132" fill="#d6d8da">  Will re-point <tspan fill="#5fd0d6" font-weight="700">47 chat(s)</tspan> <tspan fill="#9aa0a6">(53 references)</tspan> to their keeper</text>
+    <text x="20" y="150" fill="#d6d8da">  project, then remove <tspan fill="#ff6b6b" font-weight="700">53</tspan> duplicate entries.</text>
+
+    <text x="20" y="182" fill="#5ad17e">  ✦ <tspan fill="#9aa0a6">Chats are never deleted — only their "belongs to</tspan></text>
+    <text x="20" y="200" fill="#9aa0a6">    project" pointer changes.</text>
+
+    <text x="20" y="232" fill="#6b7075">  Backup (projects): …/projects.backup-2026-05-21_09-14-02</text>
+    <text x="20" y="250" fill="#6b7075">  Backup (chats):    …/conversations.merge-backup-2026-05-21_09-14-02</text>
+
+    <text x="20" y="282" fill="#5ad17e">  ✓ <tspan fill="#c7c9cc">Re-pointed </tspan><tspan fill="#5fd0d6" font-weight="700">47 file(s)</tspan><tspan fill="#c7c9cc">.</tspan></text>
+    <text x="20" y="300" fill="#5ad17e">  ✓ <tspan fill="#c7c9cc">Removed </tspan><tspan fill="#ff8a8a" font-weight="700">53 duplicate</tspan><tspan fill="#c7c9cc"> project entries.</tspan></text>
+
+    <line x1="20" y1="324" x2="740" y2="324" stroke="#26282b"/>
+
+    <text x="20" y="350" fill="#67b3e6">  Reopen Antigravity — your chats now sit under <tspan font-weight="700">one</tspan> project.</text>
+
+    <!-- mini before/after -->
+    <text x="20" y="386" fill="#6b7075">  before:<tspan fill="#ff8a8a">  my-app · my-app 2 · … · my-app 41</tspan>  <tspan fill="#5a5d61">(chats scattered)</tspan></text>
+    <text x="20" y="406" fill="#6b7075">  after: <tspan fill="#5ad17e">  my-app</tspan>  <tspan fill="#5fd0d6">(every chat grouped here)</tspan></text>
+  </g>
+</svg>
