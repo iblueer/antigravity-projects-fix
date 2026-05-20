@@ -148,6 +148,19 @@ npx antigravity-projects-fix scan
 antigravity-projects-fix <command> [options]
 ```
 
+### Which command should I use?
+
+| Your goal                                     | Command                  |
+| --------------------------------------------- | ------------------------ |
+| Just look — change nothing                    | `scan`                   |
+| Keep my projects, drop only the duplicates    | `consolidate --apply`    |
+| Choose exactly what to delete / keep          | `interactive`            |
+| **Delete everything — start fresh**           | `purge --apply`          |
+| Undo a previous run                           | `restore <backup-dir>`   |
+
+> All destructive commands are **dry‑run by default**, make an **automatic backup**,
+> and **ask for confirmation** before deleting. Close Antigravity first.
+
 ### Commands
 
 | Command            | What it does                                                   |
