@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="420" viewBox="0 0 760 420" font-family="'Cascadia Code','Consolas',monospace">
+  <rect width="760" height="420" rx="10" fill="#0c0c0e"/>
+  <!-- title bar -->
+  <rect width="760" height="36" rx="10" fill="#1a1b1e"/>
+  <rect y="20" width="760" height="16" fill="#1a1b1e"/>
+  <circle cx="22" cy="18" r="6" fill="#ff5f56"/>
+  <circle cx="42" cy="18" r="6" fill="#ffbd2e"/>
+  <circle cx="62" cy="18" r="6" fill="#27c93f"/>
+  <text x="380" y="23" fill="#6b7075" font-size="12" text-anchor="middle">antigravity-projects-fix — scan</text>
+
+  <g font-size="13.5">
+    <text x="20" y="68" fill="#7ee29a">$ <tspan fill="#d6d8da">node index.js scan</tspan></text>
+
+    <text x="20" y="100" fill="#9aa0a6">  Antigravity projects in ~/.gemini/config/projects</text>
+
+    <text x="20" y="130" fill="#ff8a8a">  41×<tspan fill="#67b3e6"> …/my-app</tspan></text>
+    <text x="60" y="150" fill="#5ad17e">keep<tspan fill="#c7c9cc"> my-app          a1b2c3d4-…</tspan></text>
+    <text x="60" y="168" fill="#ff6b6b">dup <tspan fill="#8a8d90"> my-app 2        e5f6a7b8-…</tspan></text>
+    <text x="60" y="186" fill="#ff6b6b">dup <tspan fill="#8a8d90"> my-app 3        12ab34cd-…  … (38 more)</tspan></text>
+
+    <text x="20" y="214" fill="#ff8a8a">   9×<tspan fill="#67b3e6"> …/api-server</tspan></text>
+    <text x="60" y="234" fill="#5ad17e">keep<tspan fill="#c7c9cc"> api-server      56ef78ab-…</tspan></text>
+    <text x="60" y="252" fill="#ff6b6b">dup <tspan fill="#8a8d90"> api-server 2 … api-server 9   (8 more)</tspan></text>
+
+    <text x="20" y="280" fill="#ff8a8a">   3×<tspan fill="#67b3e6"> …/web-client</tspan></text>
+    <text x="20" y="300" fill="#ff8a8a">   3×<tspan fill="#67b3e6"> …/mobile-app</tspan></text>
+    <text x="20" y="320" fill="#ff8a8a">   2×<tspan fill="#67b3e6"> …/docs-site</tspan></text>
+
+    <line x1="20" y1="338" x2="740" y2="338" stroke="#26282b"/>
+    <text x="20" y="362" fill="#d6d8da">  <tspan font-weight="700">58</tspan> project files  →  <tspan font-weight="700">5</tspan> real folder(s)  →  <tspan fill="#ff6b6b" font-weight="700">53 duplicate(s)</tspan></text>
+    <text x="20" y="388" fill="#6b7075">  Run `consolidate --apply` to keep one entry per folder.</text>
+  </g>
+</svg>

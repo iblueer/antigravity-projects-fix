@@ -1,0 +1,13 @@
+# dependencies (this tool has none, but just in case)
+node_modules/
+
+# local backups produced by the tool
+*.backup-*/
+projects.backup-*/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/

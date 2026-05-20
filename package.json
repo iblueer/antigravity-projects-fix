@@ -1,0 +1,42 @@
+{
+  "name": "antigravity-projects-fix",
+  "version": "1.0.0",
+  "description": "Fix the Google Antigravity 2.0 bug that splits one project into duplicate numbered Projects-panel entries (Name, Name 2, Name 3, ...).",
+  "bin": {
+    "antigravity-projects-fix": "index.js",
+    "agfix": "index.js"
+  },
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "scan": "node index.js scan"
+  },
+  "keywords": [
+    "antigravity",
+    "google-antigravity",
+    "projects",
+    "workspace",
+    "duplicate",
+    "deduplicate",
+    "cleanup",
+    "cli",
+    "gemini"
+  ],
+  "engines": {
+    "node": ">=16.7.0"
+  },
+  "files": [
+    "index.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ryukenshin546-a11y/antigravity-projects-fix.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ryukenshin546-a11y/antigravity-projects-fix/issues"
+  },
+  "homepage": "https://github.com/ryukenshin546-a11y/antigravity-projects-fix#readme",
+  "license": "MIT"
+}
