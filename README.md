@@ -287,9 +287,16 @@ re‑synced from the server. In that case you can:
   macOS/Linux (`~/.gemini`, `pgrep`) — please open an issue if anything is off on
   your OS.
 
-## 🤝 Contributing
+## 🤝 Contributing & feedback
 
-Issues and PRs are very welcome — especially:
+There are a few ways to get involved:
+
+- 🐛 **[Open an issue](https://github.com/ryukenshin546-a11y/antigravity-projects-fix/issues/new/choose)** — report a bug or request a feature (guided templates).
+- 💬 **[Start a discussion](https://github.com/ryukenshin546-a11y/antigravity-projects-fix/discussions)** — questions, ideas, or general feedback.
+- 🔀 **Open a pull request** — fork, change, and submit; a PR template will guide you.
+- ⭐ **Star the repo** if it helped you.
+
+Especially welcome:
 
 - testing on macOS / Linux,
 - findings about how/when cloud sync re‑creates entries,

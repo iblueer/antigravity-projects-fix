@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Questions & ideas (Discussions)
+    url: https://github.com/ryukenshin546-a11y/antigravity-projects-fix/discussions
+    about: For general questions, ideas, and feedback that aren't bugs or feature requests.
