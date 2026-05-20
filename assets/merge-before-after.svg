@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="380" viewBox="0 0 820 380" font-family="'Cascadia Code','Consolas',monospace">
+  <defs>
+    <linearGradient id="acc" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#67b3e6"/>
+      <stop offset="1" stop-color="#5fd0d6"/>
+    </linearGradient>
+  </defs>
+  <rect width="820" height="380" rx="10" fill="#0c0c0e"/>
+  <text x="410" y="34" font-size="14" fill="#6b7075" text-anchor="middle">merge — your chats are kept and re-homed under one project</text>
+
+  <!-- BEFORE -->
+  <g transform="translate(28,56)">
+    <rect width="350" height="296" rx="10" fill="#15161a" stroke="#3a2326"/>
+    <text x="20" y="34" font-size="15" font-weight="700" fill="#ff8a8a">BEFORE — chats scattered</text>
+
+    <text x="20" y="72" font-size="14" fill="#9aa0a6">📁 my-app</text>
+    <text x="42" y="96" font-size="13" fill="#7fb0d6">💬 “Fix login bug”</text>
+
+    <text x="20" y="132" font-size="14" fill="#9aa0a6">📁 my-app 2</text>
+    <text x="42" y="156" font-size="13" fill="#7fb0d6">💬 “Refactor the API”</text>
+
+    <text x="20" y="192" font-size="14" fill="#9aa0a6">📁 my-app 3</text>
+    <text x="42" y="216" font-size="13" fill="#7fb0d6">💬 “Write unit tests”</text>
+
+    <text x="20" y="252" font-size="14" fill="#ff6b6b">📁 my-app 41</text>
+    <text x="42" y="276" font-size="13" fill="#7fb0d6">💬 “Ship release”</text>
+  </g>
+
+  <!-- arrow -->
+  <text x="410" y="210" font-size="40" fill="url(#acc)" text-anchor="middle">→</text>
+
+  <!-- AFTER -->
+  <g transform="translate(442,56)">
+    <rect width="350" height="296" rx="10" fill="#15161a" stroke="#23402f"/>
+    <text x="20" y="34" font-size="15" font-weight="700" fill="#5ad17e">AFTER — all under one project</text>
+
+    <text x="20" y="74" font-size="15" fill="#e6e8ea">📁 my-app</text>
+    <text x="42" y="104" font-size="13" fill="#7fd6c4">💬 “Fix login bug”</text>
+    <text x="42" y="132" font-size="13" fill="#7fd6c4">💬 “Refactor the API”</text>
+    <text x="42" y="160" font-size="13" fill="#7fd6c4">💬 “Write unit tests”</text>
+    <text x="42" y="188" font-size="13" fill="#7fd6c4">💬 “Ship release”</text>
+
+    <line x1="20" y1="214" x2="330" y2="214" stroke="#23402f"/>
+    <text x="20" y="244" font-size="13" fill="#5ad17e">✓ 0 chats deleted</text>
+    <text x="20" y="268" font-size="13" fill="#9aa0a6">  duplicate entries removed</text>
+  </g>
+</svg>

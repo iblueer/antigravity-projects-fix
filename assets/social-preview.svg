@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" font-family="'Cascadia Code','Consolas',monospace">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d0e12"/>
+      <stop offset="1" stop-color="#08090c"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#67b3e6"/>
+      <stop offset="1" stop-color="#5fd0d6"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <rect width="1280" height="6" fill="url(#accent)"/>
+
+  <!-- heading -->
+  <text x="80" y="120" font-size="30" fill="#6b7075">🛸  unofficial community tool · zero dependencies</text>
+  <text x="78" y="196" font-size="62" font-weight="700" fill="#f2f3f5">antigravity-projects-fix</text>
+  <text x="80" y="250" font-size="31" fill="#c7c9cc">Fix the <tspan fill="#67b3e6">Google Antigravity 2.0</tspan> “duplicate projects” bug.</text>
+
+  <!-- before / after panel -->
+  <g transform="translate(80,300)">
+    <!-- before -->
+    <rect x="0" y="0" width="470" height="250" rx="12" fill="#15161a" stroke="#26282b"/>
+    <text x="24" y="40" font-size="22" fill="#ff8a8a" font-weight="700">BEFORE</text>
+    <text x="24" y="78" font-size="21" fill="#9aa0a6">📁 my-app</text>
+    <text x="24" y="108" font-size="21" fill="#9aa0a6">📁 my-app 2</text>
+    <text x="24" y="138" font-size="21" fill="#9aa0a6">📁 my-app 3</text>
+    <text x="24" y="168" font-size="21" fill="#6b7075">     ⋮</text>
+    <text x="24" y="200" font-size="21" fill="#ff6b6b">📁 my-app 41   ← 41 copies</text>
+    <text x="24" y="230" font-size="17" fill="#5a5d61">one folder, dozens of entries</text>
+
+    <!-- arrow -->
+    <text x="512" y="140" font-size="46" fill="url(#accent)">→</text>
+
+    <!-- after -->
+    <rect x="580" y="0" width="470" height="250" rx="12" fill="#15161a" stroke="#2c4a3a"/>
+    <text x="604" y="40" font-size="22" fill="#5ad17e" font-weight="700">AFTER</text>
+    <text x="604" y="86" font-size="23" fill="#e6e8ea">📁 my-app</text>
+    <text x="628" y="120" font-size="20" fill="#5fd0d6">💬 every chat grouped here</text>
+    <text x="604" y="170" font-size="21" fill="#9aa0a6">📁 api-server</text>
+    <text x="604" y="200" font-size="21" fill="#9aa0a6">📁 web-client</text>
+    <text x="604" y="232" font-size="17" fill="#5a5d61">one clean entry per folder</text>
+  </g>
+
+  <!-- command -->
+  <g transform="translate(80,588)">
+    <text x="0" y="0" font-size="26" fill="#7ee29a">$ <tspan fill="#d6d8da">npx antigravity-projects-fix scan</tspan>  <tspan fill="#5a5d61" font-size="20">· consolidate · merge · purge</tspan></text>
+  </g>
+</svg>

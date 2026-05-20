@@ -233,6 +233,10 @@ may not appear under the surviving “MyApp”.
 `merge` fixes that. Before removing the duplicates, it **re‑points every affected
 chat to the single keeper project**, so they all line up under one entry:
 
+<div align="center">
+<img src="assets/merge-before-after.svg" alt="Before: chats scattered across my-app, my-app 2, my-app 3 … my-app 41. After: all chats grouped under a single my-app, zero chats deleted" width="92%"/>
+</div>
+
 ```bash
 # Preview what would be re-pointed (changes nothing)
 npx antigravity-projects-fix merge
