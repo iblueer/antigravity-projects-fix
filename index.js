@@ -39,7 +39,7 @@ const path = require('path');
 const readline = require('readline');
 const { execSync } = require('child_process');
 
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 
 // ---------------------------------------------------------------- ANSI color
 const useColor =
@@ -265,27 +265,90 @@ function isAntigravityRunning() {
   }
 }
 
+function timestamp() {
+  return new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
+}
+
+function backupError(e) {
+  const err = new Error(
+    `Backup failed: ${e.message}\n` +
+    `  The backup was not created — aborting to protect your data.\n` +
+    `  Fix the issue above, or re-run with --no-backup if you're sure.`
+  );
+  err.expected = true;
+  return err;
+}
+
 function backup(dir) {
-  const stamp = new Date()
-    .toISOString()
-    .replace(/[:.]/g, '-')
-    .replace('T', '_')
-    .slice(0, 19);
-  const dest = `${dir.replace(/[/\\]+$/, '')}.backup-${stamp}`;
+  const dest = `${dir.replace(/[/\\]+$/, '')}.backup-${timestamp()}`;
   try {
     fs.cpSync(dir, dest, { recursive: true });
   } catch (e) {
     // Surface as a clear, user-facing error (no stack trace) with a recovery
     // hint instead of a raw exception.
-    const err = new Error(
-      `Backup failed: ${e.message}\n` +
-      `  The backup was not created — aborting to protect your data.\n` +
-      `  Fix the issue above, or re-run with --no-backup if you're sure.`
-    );
-    err.expected = true;
-    throw err;
+    throw backupError(e);
   }
   return dest;
+}
+
+/** Back up only the named files from `dir` into a timestamped sibling folder. */
+function backupFiles(dir, fileNames, label) {
+  const dest = `${dir.replace(/[/\\]+$/, '')}.${label}-backup-${timestamp()}`;
+  try {
+    fs.mkdirSync(dest, { recursive: true });
+    for (const f of fileNames) fs.copyFileSync(path.join(dir, f), path.join(dest, f));
+  } catch (e) {
+    throw backupError(e);
+  }
+  return dest;
+}
+
+/**
+ * Replace every ASCII occurrence of `from` with `to` inside a Buffer, in place.
+ * Only valid when both are the same byte length — UUID→UUID is always 36 chars —
+ * which keeps the file byte-length identical so the SQLite/protobuf layout
+ * stays intact. Returns the number of replacements made.
+ */
+function replaceAsciiInBuffer(buf, from, to) {
+  const f = Buffer.from(from, 'ascii');
+  const t = Buffer.from(to, 'ascii');
+  if (f.length !== t.length) throw new Error('refusing non-length-preserving replace');
+  let count = 0;
+  let pos = 0;
+  for (;;) {
+    const i = buf.indexOf(f, pos);
+    if (i === -1) break;
+    t.copy(buf, i);
+    count++;
+    pos = i + f.length;
+  }
+  return count;
+}
+
+/** Count ASCII occurrences of `needle` in a Buffer without modifying it. */
+function countAsciiInBuffer(buf, needle) {
+  const n = Buffer.from(needle, 'ascii');
+  let count = 0;
+  let pos = 0;
+  for (;;) {
+    const i = buf.indexOf(n, pos);
+    if (i === -1) break;
+    count++;
+    pos = i + n.length;
+  }
+  return count;
+}
+
+/**
+ * Locate the conversations folder. Chats live next to the project registry:
+ *   <base>/.gemini/config/projects   ←  projectsDir
+ *   <base>/.gemini/antigravity/conversations
+ * Honors an explicit --conversations override.
+ */
+function resolveConversationsDir(projectsDir, flags) {
+  if (flags.conversations && typeof flags.conversations === 'string') return flags.conversations;
+  const geminiDir = path.dirname(path.dirname(projectsDir)); // .../.gemini
+  return path.join(geminiDir, 'antigravity', 'conversations');
 }
 
 function ask(question) {
@@ -402,6 +465,137 @@ async function cmdConsolidate(dir, flags) {
   doDelete(dir, toDelete, flags);
 }
 
+// Merge: re-point chats from duplicate projects onto one keeper per folder,
+// THEN remove the duplicate project entries. No chat is deleted — only the
+// project UUID embedded inside each chat database is rewritten to the keeper.
+async function cmdMerge(dir, flags) {
+  const { groups, entries } = cmdScan(dir);
+  if (!entries.length) return;
+
+  // dupId -> keeperId, for every non-keeper entry in each folder group.
+  const remap = new Map();
+  let dupCount = 0;
+  for (const list of groups.values()) {
+    const keeper = list[0];
+    for (let i = 1; i < list.length; i++) {
+      if (list[i].id && keeper.id && list[i].id !== keeper.id) {
+        remap.set(list[i].id, keeper.id);
+        dupCount++;
+      }
+    }
+  }
+  if (!remap.size) {
+    console.log(green('  Nothing to merge — no duplicate projects.\n'));
+    return;
+  }
+
+  // Find the conversations folder and the chat databases inside it.
+  const convDir = resolveConversationsDir(dir, flags);
+  let convFiles;
+  try {
+    convFiles = fs.readdirSync(convDir).filter((f) => /\.(db|db-wal)$/i.test(f));
+  } catch (_) {
+    console.log(yellow(`\n  Conversations folder not found at:\n  ${convDir}`));
+    console.log(
+      dim('  Can\'t re-point chats. Use `consolidate` to just remove duplicates,\n') +
+      dim('  or pass the right path with --conversations <path>.\n')
+    );
+    return;
+  }
+
+  // Plan: which files reference a duplicate UUID, and how many times.
+  const plan = [];
+  for (const f of convFiles) {
+    const full = path.join(convDir, f);
+    let buf;
+    try { buf = fs.readFileSync(full); } catch (_) { continue; }
+    const edits = [];
+    for (const [dupId, keepId] of remap) {
+      const c = countAsciiInBuffer(buf, dupId);
+      if (c) edits.push({ from: dupId, to: keepId, count: c });
+    }
+    if (edits.length) plan.push({ file: f, full, edits, size: buf.length });
+  }
+
+  const chatsAffected = new Set(plan.map((p) => p.file.replace(/\.(db|db-wal)$/i, ''))).size;
+  const totalRefs = plan.reduce((s, p) => s + p.edits.reduce((a, e) => a + e.count, 0), 0);
+
+  const apply = flags.apply;
+  console.log(
+    (apply ? bold('\n  Will re-point ') : bold('\n  [dry-run] would re-point ')) +
+      cyan(`${chatsAffected} chat(s)`) +
+      ` (${totalRefs} reference${totalRefs === 1 ? '' : 's'}) to their keeper project, then remove ` +
+      red(`${dupCount}`) +
+      ` duplicate entr${dupCount === 1 ? 'y' : 'ies'}.\n`
+  );
+  if (!plan.length) {
+    console.log(
+      dim('  No chats reference the duplicate projects — `consolidate` would be enough here.\n')
+    );
+  }
+  console.log(dim('  Chats are never deleted — only their "belongs to project" pointer changes.'));
+  if (!apply) {
+    console.log(dim('  Re-run with --apply to perform it.\n'));
+    return;
+  }
+
+  await guardRunning(flags);
+  if (
+    !(await confirm(
+      flags,
+      `\n  Re-point ${chatsAffected} chat(s) and remove ${dupCount} duplicate project(s)?`
+    ))
+  ) {
+    console.log(dim('  Cancelled.\n'));
+    return;
+  }
+
+  // Back up the project registry AND every chat file we're about to touch.
+  if (!flags['no-backup']) {
+    const pdest = backup(dir);
+    console.log(dim(`  Backup (projects): ${pdest}`));
+    if (plan.length) {
+      const cdest = backupFiles(convDir, plan.map((p) => p.file), 'merge');
+      console.log(dim(`  Backup (chats):    ${cdest}`));
+    }
+  }
+
+  // Rewrite the embedded UUIDs — length-preserving, with a size assertion.
+  let edited = 0;
+  const failed = [];
+  for (const p of plan) {
+    try {
+      const buf = fs.readFileSync(p.full);
+      const before = buf.length;
+      for (const e of p.edits) replaceAsciiInBuffer(buf, e.from, e.to);
+      if (buf.length !== before) throw new Error(`size changed in memory (${before} → ${buf.length})`);
+      fs.writeFileSync(p.full, buf);
+      if (fs.statSync(p.full).size !== before) throw new Error('written size mismatch');
+      edited++;
+    } catch (err) {
+      failed.push({ file: p.file, reason: err.message });
+    }
+  }
+  if (failed.length) {
+    console.log(yellow(`\n  Warning: ${failed.length} chat file(s) could not be re-pointed:`));
+    for (const f of failed) console.log(dim(`    ${f.file} — ${f.reason}`));
+    console.log(dim('  Restore from the chat backup above if the result looks wrong.'));
+  }
+  console.log(green(`  Re-pointed ${edited} file(s).`));
+
+  // Now remove the duplicate project entries (backup already taken above).
+  const toDelete = [];
+  for (const list of groups.values()) {
+    for (let i = 1; i < list.length; i++) toDelete.push(list[i]);
+  }
+  let removed = 0;
+  for (const e of toDelete) {
+    try { fs.rmSync(e.full, { force: true }); removed++; } catch (_) { /* reported below */ }
+  }
+  console.log(green(`  Removed ${removed} duplicate project entr${removed === 1 ? 'y' : 'ies'}.`));
+  console.log(dim('  Reopen Antigravity — your chats should now sit under one project.\n'));
+}
+
 async function cmdPurge(dir, flags) {
   const { entries, broken } = readProjects(dir);
   if (broken && broken.length) {
@@ -467,10 +661,34 @@ function cmdRestore(backupDir, dir, flags) {
     console.log(red(`\n  Backup not found: ${backupDir}\n`));
     process.exit(1);
   }
-  fs.mkdirSync(dir, { recursive: true });
-  const files = fs.readdirSync(backupDir).filter((f) => f.toLowerCase().endsWith('.json'));
-  for (const f of files) fs.copyFileSync(path.join(backupDir, f), path.join(dir, f));
-  console.log(green(`\n  Restored ${files.length} project file(s) to ${dir}\n`));
+  // Route each backed-up file to the right place by type: project registry
+  // files (.json) go to the projects folder; chat databases (.db / .db-wal /
+  // .db-shm) go to the conversations folder. This handles both the plain
+  // `*.backup-*` (projects) and the `conversations.merge-backup-*` (chats).
+  const convDir = resolveConversationsDir(dir, flags);
+  const files = fs.readdirSync(backupDir);
+  let proj = 0;
+  let chat = 0;
+  for (const f of files) {
+    const src = path.join(backupDir, f);
+    if (!fs.statSync(src).isFile()) continue;
+    const lower = f.toLowerCase();
+    let target = null;
+    if (lower.endsWith('.json')) target = dir;
+    else if (/\.(db|db-wal|db-shm)$/.test(lower)) target = convDir;
+    if (!target) continue;
+    fs.mkdirSync(target, { recursive: true });
+    fs.copyFileSync(src, path.join(target, f));
+    if (target === dir) proj++; else chat++;
+  }
+  const parts = [];
+  if (proj) parts.push(`${proj} project file(s) → ${dir}`);
+  if (chat) parts.push(`${chat} chat file(s) → ${convDir}`);
+  if (!parts.length) {
+    console.log(yellow(`\n  Nothing recognizable to restore in ${backupDir}\n`));
+    return;
+  }
+  console.log(green('\n  Restored ' + parts.join('\n           ') + '\n'));
 }
 
 function shortFolder(key) {
@@ -656,6 +874,8 @@ ${bold('COMMANDS')}
   scan                 Show projects grouped by folder + duplicate count (default)
   interactive, i       Checkbox UI — pick exactly which entries to delete
   consolidate          Keep one entry per folder, remove the duplicates
+  merge                Re-point chats onto one keeper, then remove duplicates
+                       ${dim('(no chat is deleted — experimental)')}
   purge                Remove every project entry (clean slate)
   restore <dir>        Copy project files back from a backup folder
 
@@ -663,13 +883,15 @@ ${bold('INTERACTIVE KEYS')}
   ↑/↓ move   space toggle   a all   n none   d duplicates   enter apply   q quit
 
 ${bold('OPTIONS')}
-  --apply              Actually perform the change (consolidate/purge are
+  --apply              Actually perform the change (consolidate/merge/purge are
                        dry-run without this)
   -y, --yes            Skip the confirmation prompt
   --no-backup          Do not create a backup before deleting
   --force              Skip the "is Antigravity running?" safety check
   --dir <path>         Override the projects folder
                        ${dim('(default: ~/.gemini/config/projects)')}
+  --conversations <path>  Override the chats folder for ${cyan('merge')}
+                       ${dim('(default: ~/.gemini/antigravity/conversations)')}
   --no-color           Disable colored output
   -h, --help           Show this help
   -v, --version        Show version
@@ -678,6 +900,8 @@ ${bold('EXAMPLES')}
   antigravity-projects-fix scan
   antigravity-projects-fix consolidate            ${dim('# preview')}
   antigravity-projects-fix consolidate --apply    ${dim('# do it (with backup)')}
+  antigravity-projects-fix merge                  ${dim('# preview chat re-pointing')}
+  antigravity-projects-fix merge --apply          ${dim('# keep chats, group under one')}
   antigravity-projects-fix purge --apply --yes
   antigravity-projects-fix restore ~/.gemini/config/projects.backup-...
 
@@ -759,6 +983,9 @@ async function main() {
       break;
     case 'consolidate':
       await cmdConsolidate(dir, flags);
+      break;
+    case 'merge':
+      await cmdMerge(dir, flags);
       break;
     case 'purge':
       await cmdPurge(dir, flags);
