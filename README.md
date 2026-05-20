@@ -56,6 +56,7 @@ It reads Antigravity's local project registry, groups the entries by the *real*
 folder each one points to, and lets you:
 
 - **`scan`** — see exactly how bad the duplication is (read‑only)
+- **`interactive`** — a checkbox UI to pick *exactly* which entries to delete
 - **`consolidate`** — keep **one** entry per folder, delete the rest
 - **`purge`** — wipe **all** project entries for a clean slate
 - **`restore`** — undo, from an automatic backup
@@ -149,12 +150,37 @@ antigravity-projects-fix <command> [options]
 
 ### Commands
 
-| Command            | What it does                                              |
-| ------------------ | -------------------------------------------------------- |
-| `scan` *(default)* | List projects grouped by folder and count the duplicates |
-| `consolidate`      | Keep **one** entry per folder, remove the duplicates      |
-| `purge`            | Remove **every** project entry (clean slate)              |
-| `restore <dir>`    | Copy project files back from a backup folder             |
+| Command            | What it does                                                   |
+| ------------------ | ------------------------------------------------------------- |
+| `scan` *(default)* | List projects grouped by folder and count the duplicates      |
+| `interactive`, `i` | **Checkbox UI** — tick exactly which entries to delete         |
+| `consolidate`      | Keep **one** entry per folder, remove the duplicates           |
+| `purge`            | Remove **every** project entry (clean slate)                   |
+| `restore <dir>`    | Copy project files back from a backup folder                  |
+
+### Interactive mode (recommended)
+
+Antigravity itself has **no multi‑select** and takes ~3 clicks to remove a single
+project. This mode fixes that: one screen, tick everything you want gone, keep the
+rest, apply once.
+
+```bash
+node index.js interactive
+```
+
+<div align="center">
+<img src="assets/interactive.svg" alt="Interactive checkbox UI: arrow keys to move, space to toggle, enter to apply" width="80%"/>
+</div>
+
+- **↑ / ↓** (or `j` / `k`) — move
+- **Space** — toggle the row
+- **a** — select all · **n** — select none · **d** — select all duplicates (the default)
+- **Enter** — review, then confirm before anything is deleted
+- **q** / **Esc** — quit without changing anything
+
+Duplicates are pre‑selected for you (one keeper per folder stays unchecked), so for
+the common case you can just press **Enter**. Nothing is deleted until you confirm,
+and a backup is always made first.
 
 ### Options
 
@@ -172,6 +198,9 @@ antigravity-projects-fix <command> [options]
 ### Examples
 
 ```bash
+# Pick exactly what to delete in a checkbox UI (recommended)
+node index.js interactive
+
 # 1. See what's going on (read-only, changes nothing)
 node index.js scan
 

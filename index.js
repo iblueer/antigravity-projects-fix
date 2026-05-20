@@ -28,7 +28,7 @@ const path = require('path');
 const readline = require('readline');
 const { execSync } = require('child_process');
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 
 // ---------------------------------------------------------------- ANSI color
 const useColor =
@@ -347,6 +347,172 @@ function cmdRestore(backupDir, dir, flags) {
   console.log(green(`\n  Restored ${files.length} project file(s) to ${dir}\n`));
 }
 
+function shortFolder(key) {
+  if (key.startsWith('(')) return key;
+  return key.replace(/\/+$/, '').split('/').pop() || key;
+}
+
+// Interactive checkbox picker: choose exactly which entries to delete.
+async function cmdInteractive(dir, flags) {
+  const { error, entries } = readProjects(dir);
+  if (error === 'missing') {
+    console.log(yellow(`\n  No projects folder found at:\n  ${dir}\n`));
+    return;
+  }
+  if (error) {
+    console.log(red(`\n  Could not read ${dir}: ${error}\n`));
+    process.exit(1);
+  }
+  if (!entries.length) {
+    console.log(green('\n  No project entries — nothing to do.\n'));
+    return;
+  }
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    console.log(red('\n  Interactive mode needs a real terminal (TTY).'));
+    console.log(dim('  Run it directly in your terminal, or use `consolidate` / `purge`.\n'));
+    process.exit(1);
+  }
+
+  // Order by biggest groups first; keeper first within each group.
+  const groups = [...groupByFolder(entries).values()].sort((a, b) => b.length - a.length);
+  const ordered = [];
+  const firstOfGroup = new Set();
+  for (const list of groups) {
+    list.forEach((e, idx) => {
+      if (idx === 0) firstOfGroup.add(ordered.length);
+      ordered.push(e);
+    });
+  }
+
+  // Default: pre-select every duplicate (everything except one keeper per folder).
+  const selected = new Set();
+  ordered.forEach((_, i) => {
+    if (!firstOfGroup.has(i)) selected.add(i);
+  });
+
+  let cursor = 0;
+  let top = 0;
+  let prev = 0;
+  const pageSize = Math.max(5, (process.stdout.rows || 24) - 7);
+  const pad = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s.padEnd(n));
+
+  const draw = () => {
+    if (cursor < top) top = cursor;
+    else if (cursor >= top + pageSize) top = cursor - pageSize + 1;
+    const end = Math.min(top + pageSize, ordered.length);
+    const out = [];
+    out.push(bold('  Select entries to DELETE'));
+    out.push(dim('  ↑/↓ move · space toggle · a all · n none · d duplicates · enter apply · q quit'));
+    out.push(dim(top > 0 ? `      ↑ ${top} more` : ' '));
+    for (let i = top; i < end; i++) {
+      const e = ordered[i];
+      const box = selected.has(i) ? red('[x]') : '[ ]';
+      const ptr = i === cursor ? cyan('❯') : ' ';
+      const nm = pad(e.name, 22);
+      const name = i === cursor ? bold(nm) : nm;
+      const tag = firstOfGroup.has(i) ? green('keep?') : dim('dup  ');
+      out.push(` ${ptr} ${box} ${name} ${tag} ${dim(shortFolder(e.key))}  ${dim(e.id.slice(0, 8))}`);
+    }
+    out.push(dim(end < ordered.length ? `      ↓ ${ordered.length - end} more` : ' '));
+    const sel = selected.size;
+    out.push(
+      '  ' +
+        (sel ? red(`${sel} to delete`) : green('0 to delete')) +
+        dim(`  ·  keeping ${ordered.length - sel}`)
+    );
+    if (prev) process.stdout.write(`\x1b[${prev}A`);
+    process.stdout.write('\x1b[0J' + out.join('\n') + '\n');
+    prev = out.length;
+  };
+
+  readline.emitKeypressEvents(process.stdin);
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+  draw();
+
+  await new Promise((resolve) => {
+    const cleanup = () => {
+      process.stdin.removeListener('keypress', onKey);
+      if (process.stdin.isTTY) process.stdin.setRawMode(false);
+      process.stdin.pause();
+      if (process.stdin.unref) process.stdin.unref();
+    };
+
+    const finish = async () => {
+      const toDelete = [...selected].sort((a, b) => a - b).map((i) => ordered[i]);
+      console.log('');
+      if (!toDelete.length) {
+        console.log(yellow('  Nothing selected — nothing to do.\n'));
+        return;
+      }
+      console.log(bold(`  Review: ${red(toDelete.length + ' to delete')}, keeping ${ordered.length - toDelete.length}`));
+      for (const e of toDelete.slice(0, 12)) {
+        console.log('   ' + red('✕ ') + e.name + dim('  ' + shortFolder(e.key)));
+      }
+      if (toDelete.length > 12) console.log(dim(`   … and ${toDelete.length - 12} more`));
+
+      // Warn if any folder would be left with zero entries.
+      const delByKey = {};
+      const sizeByKey = {};
+      ordered.forEach((e) => (sizeByKey[e.key] = (sizeByKey[e.key] || 0) + 1));
+      toDelete.forEach((e) => (delByKey[e.key] = (delByKey[e.key] || 0) + 1));
+      const gone = Object.keys(delByKey).filter((k) => delByKey[k] === sizeByKey[k]);
+      if (gone.length) {
+        console.log(
+          yellow(`  ⚠ ${gone.length} folder(s) will have NO entry left: ${gone.map(shortFolder).join(', ')}`)
+        );
+      }
+      console.log('');
+
+      await guardRunning(flags);
+      if (!(await confirm(flags, `  Delete ${toDelete.length} selected entr${toDelete.length === 1 ? 'y' : 'ies'}?`))) {
+        console.log(dim('  Cancelled.\n'));
+        return;
+      }
+      doDelete(dir, toDelete, flags);
+    };
+
+    const onKey = async (str, key) => {
+      if (!key) return;
+      if (key.ctrl && key.name === 'c') {
+        cleanup();
+        console.log(dim('\n  Cancelled.\n'));
+        process.exit(130);
+      }
+      let act = true;
+      switch (key.name) {
+        case 'up': case 'k': cursor = (cursor - 1 + ordered.length) % ordered.length; break;
+        case 'down': case 'j': cursor = (cursor + 1) % ordered.length; break;
+        case 'pageup': cursor = Math.max(0, cursor - pageSize); break;
+        case 'pagedown': cursor = Math.min(ordered.length - 1, cursor + pageSize); break;
+        case 'home': cursor = 0; break;
+        case 'end': cursor = ordered.length - 1; break;
+        case 'space': selected.has(cursor) ? selected.delete(cursor) : selected.add(cursor); break;
+        case 'a': ordered.forEach((_, i) => selected.add(i)); break;
+        case 'n': selected.clear(); break;
+        case 'd':
+          selected.clear();
+          ordered.forEach((_, i) => { if (!firstOfGroup.has(i)) selected.add(i); });
+          break;
+        case 'q': case 'escape':
+          cleanup();
+          console.log(dim('\n  Cancelled — nothing changed.\n'));
+          resolve();
+          return;
+        case 'return':
+          cleanup();
+          await finish();
+          resolve();
+          return;
+        default: act = false;
+      }
+      if (act) draw();
+    };
+
+    process.stdin.on('keypress', onKey);
+  });
+}
+
 function help() {
   console.log(`
 ${bold('antigravity-projects-fix')} ${dim('v' + VERSION)}
@@ -357,9 +523,13 @@ ${bold('USAGE')}
 
 ${bold('COMMANDS')}
   scan                 Show projects grouped by folder + duplicate count (default)
+  interactive, i       Checkbox UI — pick exactly which entries to delete
   consolidate          Keep one entry per folder, remove the duplicates
   purge                Remove every project entry (clean slate)
   restore <dir>        Copy project files back from a backup folder
+
+${bold('INTERACTIVE KEYS')}
+  ↑/↓ move   space toggle   a all   n none   d duplicates   enter apply   q quit
 
 ${bold('OPTIONS')}
   --apply              Actually perform the change (consolidate/purge are
@@ -397,6 +567,10 @@ async function main() {
   switch (cmd) {
     case 'scan':
       cmdScan(dir);
+      break;
+    case 'interactive':
+    case 'i':
+      await cmdInteractive(dir, flags);
       break;
     case 'consolidate':
       await cmdConsolidate(dir, flags);
