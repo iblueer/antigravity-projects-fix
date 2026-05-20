@@ -22,13 +22,24 @@
  * Not affiliated with Google LLC.
  */
 
+// ---------------------------------------------------------------- node version guard
+// fs.cpSync was added in Node 16.7.0. Fail fast with a clear message.
+const [nodeMaj, nodeMin] = process.versions.node.split('.').map(Number);
+if (nodeMaj < 16 || (nodeMaj === 16 && nodeMin < 7)) {
+  process.stderr.write(
+    `\n  This tool requires Node.js >= 16.7. You have ${process.version}.\n` +
+    `  Please upgrade: https://nodejs.org\n\n`
+  );
+  process.exit(1);
+}
+
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const readline = require('readline');
 const { execSync } = require('child_process');
 
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 
 // ---------------------------------------------------------------- ANSI color
 const useColor =
@@ -102,13 +113,21 @@ function readProjects(dir) {
   try {
     files = fs.readdirSync(dir).filter((f) => f.toLowerCase().endsWith('.json'));
   } catch (e) {
-    return { error: e.code === 'ENOENT' ? 'missing' : e.message, entries: [] };
+    return { error: e.code === 'ENOENT' ? 'missing' : e.message, entries: [], broken: [] };
   }
   const entries = [];
+  const broken = [];
   for (const file of files) {
     const full = path.join(dir, file);
+    let raw;
     try {
-      const json = JSON.parse(fs.readFileSync(full, 'utf8'));
+      raw = fs.readFileSync(full, 'utf8');
+    } catch (e) {
+      broken.push({ file, reason: `read error: ${e.message}` });
+      continue;
+    }
+    try {
+      const json = JSON.parse(raw);
       const uris = collectFolderUris(json).map(normalizeUri).sort();
       entries.push({
         file,
@@ -120,10 +139,10 @@ function readProjects(dir) {
         mtime: fs.statSync(full).mtimeMs,
       });
     } catch (e) {
-      entries.push({ file, full, name: '(unparseable)', uris: [], key: `(bad:${file})`, broken: true });
+      broken.push({ file, reason: `invalid JSON: ${e.message}` });
     }
   }
-  return { entries };
+  return { entries, broken };
 }
 
 function groupByFolder(entries) {
@@ -177,7 +196,16 @@ function backup(dir) {
     .replace('T', '_')
     .slice(0, 19);
   const dest = `${dir.replace(/[/\\]+$/, '')}.backup-${stamp}`;
-  fs.cpSync(dir, dest, { recursive: true });
+  try {
+    fs.cpSync(dir, dest, { recursive: true });
+  } catch (e) {
+    // Surface as a clear error with recovery hint instead of a raw exception.
+    throw new Error(
+      `Backup failed: ${e.message}\n` +
+      `  The backup was not created — aborting to protect your data.\n` +
+      `  Fix the issue above, or re-run with --no-backup if you're sure.`
+    );
+  }
   return dest;
 }
 
@@ -212,7 +240,7 @@ async function guardRunning(flags) {
 
 // ---------------------------------------------------------------- commands
 function cmdScan(dir) {
-  const { error, entries } = readProjects(dir);
+  const { error, entries, broken } = readProjects(dir);
   if (error === 'missing') {
     console.log(yellow(`\n  No projects folder found at:\n  ${dir}`));
     console.log(dim('  Nothing to scan. (Is Antigravity installed for this user?)\n'));
@@ -221,6 +249,12 @@ function cmdScan(dir) {
   if (error) {
     console.log(red(`\n  Could not read ${dir}: ${error}\n`));
     process.exit(1);
+  }
+
+  if (broken && broken.length) {
+    console.log(yellow(`\n  Warning: ${broken.length} file(s) could not be parsed and will be skipped:`));
+    for (const b of broken) console.log(dim(`    ${b.file} — ${b.reason}`));
+    console.log('');
   }
 
   const groups = groupByFolder(entries);
@@ -290,7 +324,12 @@ async function cmdConsolidate(dir, flags) {
 }
 
 async function cmdPurge(dir, flags) {
-  const { entries } = readProjects(dir);
+  const { entries, broken } = readProjects(dir);
+  if (broken && broken.length) {
+    console.log(yellow(`\n  Warning: ${broken.length} file(s) could not be parsed and will be skipped:`));
+    for (const b of broken) console.log(dim(`    ${b.file} — ${b.reason}`));
+    console.log('');
+  }
   if (!entries.length) {
     console.log(yellow('\n  No project entries to purge.\n'));
     return;
@@ -316,19 +355,27 @@ async function cmdPurge(dir, flags) {
 
 function doDelete(dir, list, flags) {
   if (!flags['no-backup']) {
+    // backup() throws with a clear message on failure — let it propagate so we
+    // never start deleting without a safety net.
     const dest = backup(dir);
     console.log(dim(`  Backup: ${dest}`));
   }
   let removed = 0;
+  const failed = [];
   for (const e of list) {
     try {
       fs.rmSync(e.full, { force: true });
       removed++;
     } catch (err) {
-      console.log(red(`  Failed to remove ${e.file}: ${err.message}`));
+      failed.push({ file: e.file, reason: err.message });
     }
   }
-  console.log(green(`  Removed ${removed} file(s).`));
+  if (failed.length) {
+    console.log(yellow(`\n  Warning: ${failed.length} file(s) could not be removed:`));
+    for (const f of failed) console.log(dim(`    ${f.file} — ${f.reason}`));
+    console.log(dim('  These files were NOT deleted. Use restore if the result looks wrong.'));
+  }
+  console.log(green(`\n  Removed ${removed} file(s).`) + (failed.length ? yellow(` (${failed.length} failed)`) : ''));
   console.log(dim('  Reopen Antigravity to verify the Projects panel.\n'));
 }
 
@@ -354,7 +401,7 @@ function shortFolder(key) {
 
 // Interactive checkbox picker: choose exactly which entries to delete.
 async function cmdInteractive(dir, flags) {
-  const { error, entries } = readProjects(dir);
+  const { error, entries, broken } = readProjects(dir);
   if (error === 'missing') {
     console.log(yellow(`\n  No projects folder found at:\n  ${dir}\n`));
     return;
@@ -362,6 +409,11 @@ async function cmdInteractive(dir, flags) {
   if (error) {
     console.log(red(`\n  Could not read ${dir}: ${error}\n`));
     process.exit(1);
+  }
+  if (broken && broken.length) {
+    console.log(yellow(`\n  Warning: ${broken.length} file(s) could not be parsed and will be skipped:`));
+    for (const b of broken) console.log(dim(`    ${b.file} — ${b.reason}`));
+    console.log('');
   }
   if (!entries.length) {
     console.log(green('\n  No project entries — nothing to do.\n'));
@@ -555,13 +607,41 @@ ${dim('Close Antigravity before applying changes. Not affiliated with Google LLC
 }
 
 // ---------------------------------------------------------------- main
+
+// Safety net: if the process dies while raw mode is active (e.g. kill signal,
+// uncaught error), restore the terminal so the shell isn't left broken.
+process.on('exit', () => {
+  try {
+    if (process.stdin.isTTY && process.stdin.isRaw) {
+      process.stdin.setRawMode(false);
+    }
+  } catch (_) {
+    // Best-effort; stdin may already be destroyed.
+  }
+});
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const flags = args.flags;
   if (flags.h || flags.help) return help();
   if (flags.v || flags.version) return console.log(VERSION);
 
-  const dir = flags.dir && typeof flags.dir === 'string' ? flags.dir : defaultProjectsDir();
+  // Validate --dir early: must exist and be a directory, not a file or typo.
+  const rawDir = flags.dir;
+  if (rawDir !== undefined) {
+    if (typeof rawDir !== 'string' || !rawDir.trim()) {
+      console.log(red('\n  --dir requires a path argument. Example: --dir ~/.gemini/config/projects\n'));
+      process.exit(1);
+    }
+    let stat;
+    try { stat = fs.statSync(rawDir); } catch (_) { /* will be caught per-command */ }
+    if (stat && !stat.isDirectory()) {
+      console.log(red(`\n  --dir path is not a directory: ${rawDir}\n`));
+      process.exit(1);
+    }
+  }
+
+  const dir = rawDir && typeof rawDir === 'string' ? rawDir : defaultProjectsDir();
   const cmd = args._[0] || 'scan';
 
   switch (cmd) {
