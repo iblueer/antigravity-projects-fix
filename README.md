@@ -33,6 +33,7 @@ When one project folder shows up in the sidebar as `MyApp`, `MyApp 2`, `MyApp 3`
 - [Safety](#-safety)
 - [Will the duplicates come back? (cloud sync)](#-will-the-duplicates-come-back-cloud-sync)
 - [Limitations](#-limitations)
+- [FAQ](#-faq)
 - [Contributing](#-contributing)
 - [License & disclaimer](#-license--disclaimer)
 
@@ -334,6 +335,35 @@ re‑synced from the server. In that case you can:
   code paths (`~/.gemini`, `pgrep`) and *should* work — but they are **unverified on
   real hardware.** On those systems, treat it as experimental: run `scan` first,
   rely on the automatic backup, and please report results in an issue or discussion.
+
+## ❓ FAQ
+
+**How do I remove duplicate projects in Google Antigravity 2.0?**
+Run `node index.js scan` to see the duplicates, then `node index.js consolidate --apply`
+to keep one entry per folder. A backup is made automatically. See [Usage](#-usage).
+
+**Why does my Antigravity sidebar show the same project many times (`MyApp 2`, `MyApp 3` …)?**
+Antigravity 2.0 identifies each workspace by a generated UUID instead of by its
+folder path, and the migration keeps minting a new UUID for the same folder.
+See [Why does it happen?](#-why-does-it-happen).
+
+**Is it safe? Will it delete my code or conversations?**
+It only edits the project **registry** files (`~/.gemini/config/projects`). Your
+code and your conversation history are never touched, every destructive action is
+dry‑run by default, and a full backup is made before anything is deleted. See [Safety](#-safety).
+
+**Can I undo it?**
+Yes — `node index.js restore <backup-dir>` restores from the automatic backup.
+
+**It says "No projects folder found" but I have the bug — what now?**
+Your install may live in a non-default location. The tool [auto-detects](#-where-are-the-files-auto-detect)
+common paths and, if it can't find one, lists everywhere it looked so you can
+point `--dir` at the right folder.
+
+**Does it work on macOS / Linux?**
+The code paths are cross-platform, but it's currently **tested on Windows only.**
+On macOS/Linux, run `scan` first and rely on the backup — and please
+[report your results](https://github.com/ryukenshin546-a11y/antigravity-projects-fix/discussions).
 
 ## 🤝 Contributing & feedback
 
