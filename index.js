@@ -39,7 +39,7 @@ const path = require('path');
 const readline = require('readline');
 const { execSync } = require('child_process');
 
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 
 // ---------------------------------------------------------------- ANSI color
 const useColor =
@@ -76,8 +76,84 @@ function parseArgs(argv) {
 }
 
 // ---------------------------------------------------------------- helpers
+
+/**
+ * Candidate locations where Antigravity may keep its project registry.
+ * The install path is NOT the same on every machine: it varies by OS, by
+ * Antigravity version, by env overrides, and by Electron's user-data dir.
+ * We list every plausible spot, most-likely first, and let the caller pick
+ * the one that actually contains project JSON files.
+ */
+function candidateProjectsDirs() {
+  const home = os.homedir();
+  const dirs = [];
+  const add = (...p) => {
+    const full = path.join(...p);
+    if (!dirs.includes(full)) dirs.push(full);
+  };
+
+  // 1. Explicit override wins.
+  if (process.env.GEMINI_HOME) add(process.env.GEMINI_HOME, 'config', 'projects');
+
+  // 2. The known default (current Antigravity 2.x on Windows/macOS/Linux).
+  add(home, '.gemini', 'config', 'projects');
+
+  // 3. XDG config dir (some Linux setups).
+  const xdg = process.env.XDG_CONFIG_HOME;
+  if (xdg) add(xdg, 'gemini', 'config', 'projects');
+  add(home, '.config', 'gemini', 'config', 'projects');
+
+  // 4. Electron user-data dirs, in case a future build moves the registry there.
+  if (process.platform === 'win32') {
+    if (process.env.APPDATA) add(process.env.APPDATA, 'Antigravity', 'config', 'projects');
+    if (process.env.LOCALAPPDATA) add(process.env.LOCALAPPDATA, 'Antigravity', 'config', 'projects');
+  } else if (process.platform === 'darwin') {
+    add(home, 'Library', 'Application Support', 'Antigravity', 'config', 'projects');
+  }
+
+  return dirs;
+}
+
+/** Does this directory hold at least one project JSON with a folderUri? */
+function looksLikeProjectsDir(dir) {
+  let files;
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.toLowerCase().endsWith('.json'));
+  } catch (_) {
+    return false;
+  }
+  if (!files.length) return false;
+  // Peek at up to a few files; a real registry file contains "folderUri".
+  for (const f of files.slice(0, 5)) {
+    try {
+      if (fs.readFileSync(path.join(dir, f), 'utf8').includes('folderUri')) return true;
+    } catch (_) {
+      /* skip unreadable file */
+    }
+  }
+  return false;
+}
+
+/**
+ * Pick the projects dir to operate on: the first candidate that actually
+ * contains project files. Falls back to the canonical default so error
+ * messages still point somewhere sensible.
+ * @returns {{ dir: string, found: boolean, checked: string[] }}
+ */
+function resolveProjectsDir() {
+  const candidates = candidateProjectsDirs();
+  for (const dir of candidates) {
+    if (looksLikeProjectsDir(dir)) return { dir, found: true, checked: candidates };
+  }
+  // Nothing matched. If one merely exists (even if empty), prefer it; else default.
+  const existing = candidates.find((d) => {
+    try { return fs.statSync(d).isDirectory(); } catch (_) { return false; }
+  });
+  return { dir: existing || candidates[0], found: false, checked: candidates };
+}
+
 function defaultProjectsDir() {
-  return path.join(os.homedir(), '.gemini', 'config', 'projects');
+  return resolveProjectsDir().dir;
 }
 
 /** Pull every folderUri found anywhere in a project JSON object. */
@@ -644,7 +720,33 @@ async function main() {
     }
   }
 
-  const dir = rawDir && typeof rawDir === 'string' ? rawDir : defaultProjectsDir();
+  let dir;
+  if (rawDir && typeof rawDir === 'string') {
+    dir = rawDir; // user override — trust it (already validated above)
+  } else {
+    const resolved = resolveProjectsDir();
+    dir = resolved.dir;
+    if (resolved.found) {
+      // Only announce auto-detection if it landed somewhere other than the
+      // canonical default, so the common case stays quiet.
+      const canonical = path.join(os.homedir(), '.gemini', 'config', 'projects');
+      if (path.resolve(dir) !== path.resolve(canonical)) {
+        console.log(dim(`  Using detected projects folder: ${dir}`));
+      }
+    } else {
+      // Couldn't find a populated registry anywhere. Show every place we
+      // looked so the user can point --dir at the right one.
+      console.log(yellow('\n  Could not auto-detect an Antigravity projects folder.'));
+      console.log(dim('  Looked in:'));
+      for (const c of resolved.checked) console.log(dim(`    ${c}`));
+      console.log(
+        dim('\n  If your install lives elsewhere, pass it explicitly:\n') +
+        dim('    node index.js scan --dir "/path/to/.gemini/config/projects"\n')
+      );
+      // Fall through with the best-guess dir; the command will report "missing"
+      // cleanly if it really isn't there.
+    }
+  }
   const cmd = args._[0] || 'scan';
 
   switch (cmd) {
