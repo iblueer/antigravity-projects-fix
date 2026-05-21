@@ -39,7 +39,7 @@ const path = require('path');
 const readline = require('readline');
 const { execSync } = require('child_process');
 
-const VERSION = '1.4.0';
+const VERSION = '1.5.0';
 
 // ---------------------------------------------------------------- ANSI color
 const useColor =
@@ -351,6 +351,68 @@ function resolveConversationsDir(projectsDir, flags) {
   return path.join(geminiDir, 'antigravity', 'conversations');
 }
 
+/** The .gemini base dir, derived from the projects dir. */
+function geminiBaseDir(projectsDir) {
+  return path.dirname(path.dirname(projectsDir)); // .../.gemini
+}
+
+/** Electron user-data dir for Antigravity (holds globalStorage/workspaceStorage). */
+function electronUserDir() {
+  const home = os.homedir();
+  if (process.platform === 'win32' && process.env.APPDATA) {
+    return path.join(process.env.APPDATA, 'Antigravity', 'User');
+  }
+  if (process.platform === 'darwin') {
+    return path.join(home, 'Library', 'Application Support', 'Antigravity', 'User');
+  }
+  return path.join(home, '.config', 'Antigravity', 'User'); // linux default
+}
+
+/** A standard 36-char UUID → its 16 raw bytes, or null if not a standard UUID. */
+function uuidToBytes(uuid) {
+  const hex = String(uuid).replace(/-/g, '');
+  if (!/^[0-9a-fA-F]{32}$/.test(hex)) return null;
+  return Buffer.from(hex, 'hex');
+}
+
+/** List files under dir (recursive), optionally filtered by extension, bounded by cap. */
+function walkFiles(dir, exts, cap, out = []) {
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return out; }
+  for (const e of entries) {
+    if (out.length >= cap) return out;
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) walkFiles(full, exts, cap, out);
+    else if (!exts || exts.some((x) => e.name.toLowerCase().endsWith(x))) out.push(full);
+  }
+  return out;
+}
+
+/**
+ * Count how many of `files` contain at least one of the `needles` (Buffers),
+ * plus the total number of occurrences. Read-only.
+ */
+function scanFilesFor(files, needles) {
+  let filesWith = 0;
+  let occ = 0;
+  for (const f of files) {
+    let buf;
+    try { buf = fs.readFileSync(f); } catch (_) { continue; }
+    let found = false;
+    for (const n of needles) {
+      if (!n || !n.length) continue;
+      let pos = 0;
+      for (;;) {
+        const i = buf.indexOf(n, pos);
+        if (i === -1) break;
+        occ++; found = true; pos = i + n.length;
+      }
+    }
+    if (found) filesWith++;
+  }
+  return { filesWith, occ };
+}
+
 function ask(question) {
   return new Promise((resolve) => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -451,6 +513,13 @@ async function cmdConsolidate(dir, flags) {
       ` duplicate entr${toDelete.length === 1 ? 'y' : 'ies'}, keeping ` +
       green(`${groups.size}`) +
       `.\n`
+  );
+  console.log(
+    yellow('  Note: ') +
+      dim('chats created under a removed duplicate may disappear from the\n') +
+      dim('  sidebar (they are not deleted, just unlinked). To keep them grouped,\n') +
+      dim('  try `merge` instead — or run `diagnose` first if unsure. A backup is\n') +
+      dim('  made, so `restore <backup-dir>` brings everything back.\n')
   );
   if (!apply) {
     console.log(dim('  Re-run with --apply to perform it.\n'));
@@ -696,6 +765,157 @@ function shortFolder(key) {
   return key.replace(/\/+$/, '').split('/').pop() || key;
 }
 
+/**
+ * diagnose — read-only. Figures out WHERE the chat→project association lives on
+ * this machine by searching every data store for the duplicate project UUIDs
+ * (as text AND as 16-byte binary) and for the project folder path. Prints only
+ * counts and short hashes — safe to paste into a bug report.
+ *
+ * Why it exists: `merge` assumed each chat embeds its project UUID as 36-char
+ * text. That held on the author's machine but not on every setup, so merge
+ * could find nothing to re-point. This maps the real linkage per machine.
+ */
+function cmdDiagnose(dir, flags) {
+  const CAP = 5000;
+  const redactHome = (p) => {
+    const h = os.homedir();
+    return p && p.startsWith(h) ? '~' + p.slice(h.length).replace(/\\/g, '/') : p;
+  };
+
+  console.log(bold('\n  antigravity-projects-fix — diagnose ') + dim('(read-only · safe to share)'));
+  console.log(dim('  Paste this whole output into the GitHub issue. No paths or chat text are shown.\n'));
+
+  // --- environment ---
+  console.log(bold('  Environment'));
+  console.log(`    platform   : ${process.platform}`);
+  console.log(`    node       : ${process.version}`);
+
+  const { error, entries, broken } = readProjects(dir);
+  if (error === 'missing') {
+    console.log(red(`    projects   : NOT FOUND at ${redactHome(dir)}`));
+    console.log(dim('\n  Can\'t diagnose without the projects folder. Try --dir <path>.\n'));
+    return;
+  }
+  if (error) {
+    console.log(red(`    projects   : ERROR (${error})`));
+    return;
+  }
+
+  const groups = groupByFolder(entries);
+  // Duplicate UUIDs (non-keeper). If none, fall back to ALL project UUIDs so the
+  // linkage can still be mapped.
+  const dupIds = [];
+  for (const list of groups.values()) for (let i = 1; i < list.length; i++) if (list[i].id) dupIds.push(list[i].id);
+  const usingDups = dupIds.length > 0;
+  const probeIds = usingDups ? dupIds : entries.map((e) => e.id).filter(Boolean);
+
+  const convDir = resolveConversationsDir(dir, flags);
+  const base = geminiBaseDir(dir);
+  const brainDir = path.join(base, 'antigravity', 'brain');
+  const userDir = electronUserDir();
+  const stateDb = path.join(userDir, 'globalStorage', 'state.vscdb');
+  const wsStorage = path.join(userDir, 'workspaceStorage');
+
+  const exists = (p) => { try { return fs.existsSync(p); } catch (_) { return false; } };
+  console.log(`    projects   : ${redactHome(dir)}  (${entries.length} entries, ${groups.size} folders, ${dupIds.length} duplicates)`);
+  console.log(`    conversations : ${exists(convDir) ? 'FOUND' : 'NOT FOUND'}  ${redactHome(convDir)}`);
+  console.log(`    brain      : ${exists(brainDir) ? 'FOUND' : 'NOT FOUND'}`);
+  console.log(`    state.vscdb: ${exists(stateDb) ? 'FOUND' : 'NOT FOUND'}`);
+  console.log(`    workspaceStorage: ${exists(wsStorage) ? 'FOUND' : 'NOT FOUND'}`);
+  if (broken && broken.length) console.log(yellow(`    (${broken.length} unparseable project file[s] skipped)`));
+
+  // --- id format ---
+  const sampleId = probeIds[0] || '';
+  const idIsUuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(sampleId);
+  console.log(bold('\n  Project id format'));
+  console.log(`    ${idIsUuid ? '36-char text UUID' : 'non-standard: ' + JSON.stringify(sampleId.slice(0, 12) + '…')}`);
+
+  // --- build needles ---
+  const textNeedles = probeIds.map((id) => Buffer.from(id, 'ascii'));
+  const binNeedles = probeIds.map(uuidToBytes).filter(Boolean);
+
+  // folder-path needle (the linkage-by-folder theory). Read RAW folderUris from
+  // the project JSONs and generate several encodings, so the bytes match
+  // whatever Antigravity actually stored regardless of slash/encoding style.
+  const rawUris = new Set();
+  for (const e of entries) {
+    try {
+      const j = JSON.parse(fs.readFileSync(e.full, 'utf8'));
+      for (const u of collectFolderUris(j)) rawUris.add(u);
+    } catch (_) { /* skip */ }
+  }
+  const folderVariants = new Set();
+  for (const u of rawUris) {
+    folderVariants.add(u); // raw, e.g. file:///c%3A/Users/...
+    let dec; try { dec = decodeURIComponent(u); } catch (_) { dec = u; }
+    folderVariants.add(dec);
+    const noScheme = dec.replace(/^file:\/\/\/?/i, '');
+    folderVariants.add(noScheme);                   // c:/Users/...
+    folderVariants.add(noScheme.replace(/\//g, '\\')); // c:\Users\...
+  }
+  const folderNeedles = [...folderVariants].filter((s) => s && s.length > 3).map((p) => Buffer.from(p, 'utf8'));
+
+  // --- scan each store ---
+  console.log(bold(`\n  Searching ${usingDups ? 'DUPLICATE' : 'all'} project ids across data stores`) + dim(` (probing ${probeIds.length})`));
+  const row = (label, files, needles) => {
+    const r = scanFilesFor(files, needles);
+    return `${r.filesWith} file(s), ${r.occ} hit(s)`;
+  };
+  const dbFiles = exists(convDir) ? walkFiles(convDir, ['.db'], CAP) : [];
+  const walFiles = exists(convDir) ? walkFiles(convDir, ['.db-wal'], CAP) : [];
+  const brainFiles = exists(brainDir) ? walkFiles(brainDir, null, CAP) : [];
+  const brainDirNames = exists(brainDir) ? (() => { try { return fs.readdirSync(brainDir); } catch (_) { return []; } })() : [];
+  const stateFiles = exists(stateDb) ? [stateDb] : [];
+  const wsFiles = exists(wsStorage) ? walkFiles(wsStorage, null, CAP) : [];
+
+  const dupIdSet = new Set(probeIds);
+  const brainDirMatches = brainDirNames.filter((n) => dupIdSet.has(n)).length;
+
+  console.log(dim('  store                         text-UUID            binary-UUID(16B)'));
+  const line = (label, files) => {
+    const t = scanFilesFor(files, textNeedles);
+    const b = scanFilesFor(files, binNeedles);
+    console.log(
+      '    ' + label.padEnd(28) +
+      `${t.filesWith}f/${t.occ}h`.padEnd(20) +
+      `${b.filesWith}f/${b.occ}h`
+    );
+  };
+  line('conversations/*.db', dbFiles);
+  line('conversations/*.db-wal', walFiles);
+  line('brain/** (file contents)', brainFiles);
+  line('state.vscdb', stateFiles);
+  line('workspaceStorage/**', wsFiles);
+  console.log('    ' + 'brain/<id> dir names'.padEnd(28) + `${brainDirMatches} match(es)`);
+
+  // --- folder-path linkage (alternative theory) ---
+  const fp = scanFilesFor(dbFiles, folderNeedles);
+  console.log(bold('\n  Folder-path linkage (alternative)'));
+  console.log(`    conversations/*.db containing the project folder path: ${fp.filesWith} file(s)`);
+
+  // --- verdict ---
+  console.log(bold('\n  Where the chat→project link most likely lives:'));
+  const hits = [];
+  const note = (label, files) => {
+    const t = scanFilesFor(files, textNeedles).occ;
+    const b = scanFilesFor(files, binNeedles).occ;
+    if (t || b) hits.push(`${label} (${t ? 'text' : ''}${t && b ? '+' : ''}${b ? 'binary' : ''})`);
+  };
+  note('conversations', [...dbFiles, ...walFiles]);
+  note('brain', brainFiles);
+  note('state.vscdb', stateFiles);
+  note('workspaceStorage', wsFiles);
+  if (brainDirMatches) hits.push('brain dir names');
+  if (hits.length) {
+    console.log(green('    → ' + hits.join(', ')));
+  } else if (fp.filesWith) {
+    console.log(yellow('    → not by project id; chats reference the FOLDER PATH instead.'));
+  } else {
+    console.log(red('    → no link found by id or folder path. Please mention your Antigravity version.'));
+  }
+  console.log(dim('\n  Thanks! This tells us exactly how to make `merge` work on your setup.\n'));
+}
+
 // Interactive checkbox picker: choose exactly which entries to delete.
 async function cmdInteractive(dir, flags) {
   const { error, entries, broken } = readProjects(dir);
@@ -878,6 +1098,8 @@ ${bold('COMMANDS')}
                        ${dim('(no chat is deleted — experimental)')}
   purge                Remove every project entry (clean slate)
   restore <dir>        Copy project files back from a backup folder
+  diagnose, doctor     Read-only: show where chats link to projects on your
+                       machine ${dim('(safe to paste into a bug report)')}
 
 ${bold('INTERACTIVE KEYS')}
   ↑/↓ move   space toggle   a all   n none   d duplicates   enter apply   q quit
@@ -992,6 +1214,10 @@ async function main() {
       break;
     case 'restore':
       cmdRestore(args._[1], dir, flags);
+      break;
+    case 'diagnose':
+    case 'doctor':
+      cmdDiagnose(dir, flags);
       break;
     default:
       console.log(red(`\n  Unknown command: ${cmd}`));

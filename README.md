@@ -64,6 +64,7 @@ folder each one points to, and lets you:
 - **`merge`** — keep one entry **and re‑home your chats** under it (no chat is deleted)
 - **`purge`** — wipe **all** project entries for a clean slate
 - **`restore`** — undo, from an automatic backup
+- **`diagnose`** — read‑only: show how chats link to projects on *your* machine
 
 No installer, no npm packages, no network calls. One file, runs anywhere Node runs.
 
@@ -184,6 +185,7 @@ npx antigravity-projects-fix <command> [options]
 | Choose exactly what to delete / keep               | `interactive`            |
 | **Delete everything — start fresh**                | `purge --apply`          |
 | Undo a previous run                                | `restore <backup-dir>`   |
+| `merge` found 0 chats / not sure what's safe       | `diagnose`               |
 
 > All destructive commands are **dry‑run by default**, make an **automatic backup**,
 > and **ask for confirmation** before deleting. Close Antigravity first.
@@ -198,6 +200,7 @@ npx antigravity-projects-fix <command> [options]
 | `merge`            | Re‑point chats onto one keeper, **then** remove duplicates — no chat deleted |
 | `purge`            | Remove **every** project entry (clean slate)                   |
 | `restore <dir>`    | Copy project (or chat) files back from a backup folder        |
+| `diagnose`, `doctor` | **Read‑only** — report where chats link to projects on your machine (safe to share) |
 
 ### Interactive mode (recommended)
 
@@ -267,6 +270,17 @@ How it works, and why it's safe:
 > and on Windows. Run `merge` (the dry‑run) first, keep the automatic backups, and
 > if anything looks off, `restore` and fall back to `consolidate`. Feedback welcome
 > in [Discussions](https://github.com/ryukenshin546-a11y/antigravity-projects-fix/discussions).
+
+> ⚠️ **If `merge` reports "0 chats" but you *do* have chats under the duplicates**,
+> the link between chats and projects on your machine is stored differently than
+> `merge` currently detects. **Don't run `consolidate` yet** — it would unlink those
+> chats from the sidebar (they're not deleted, and `restore` brings them back).
+> Instead run the read‑only `diagnose` command and share the output so we can fix
+> `merge` for your setup:
+>
+> ```bash
+> npx antigravity-projects-fix diagnose
+> ```
 
 ### Options
 
