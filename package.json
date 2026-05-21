@@ -1,6 +1,6 @@
 {
   "name": "antigravity-projects-fix",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "Fix the Google Antigravity 2.0 bug that splits one project into duplicate numbered Projects-panel entries (Name, Name 2, Name 3, ...).",
   "bin": {
     "antigravity-projects-fix": "index.js",

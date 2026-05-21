@@ -39,7 +39,7 @@ const path = require('path');
 const readline = require('readline');
 const { execSync, execFileSync } = require('child_process');
 
-const VERSION = '1.6.0';
+const VERSION = '1.7.0';
 
 // ---------------------------------------------------------------- ANSI color
 const useColor =
@@ -313,6 +313,10 @@ function backupFiles(dir, fileNames, label) {
   return dest;
 }
 
+function backupSingleFile(filePath, label) {
+  return backupFiles(path.dirname(filePath), [path.basename(filePath)], label);
+}
+
 /**
  * Replace every ASCII occurrence of `from` with `to` inside a Buffer, in place.
  * Only valid when both are the same byte length — UUID→UUID is always 36 chars —
@@ -354,6 +358,279 @@ function writeFileAtomic(dest, buf) {
   const tmp = dest + '.agfix-tmp';
   fs.writeFileSync(tmp, buf);
   fs.renameSync(tmp, dest);
+}
+
+function isFile(p) {
+  try { return fs.statSync(p).isFile(); } catch (_) { return false; }
+}
+
+/** Read a protobuf varint as a safe JavaScript number. */
+function readProtoVarintNumber(buf, offset, limit = buf.length) {
+  let value = 0n;
+  let shift = 0n;
+  const start = offset;
+  while (offset < limit && offset - start < 10) {
+    const byte = buf[offset++];
+    value |= BigInt(byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) {
+      if (value > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+      return { value: Number(value), offset };
+    }
+    shift += 7n;
+  }
+  return null;
+}
+
+function skipProtoVarint(buf, offset, limit = buf.length) {
+  const start = offset;
+  while (offset < limit && offset - start < 10) {
+    if ((buf[offset++] & 0x80) === 0) return offset;
+  }
+  return null;
+}
+
+function skipProtoGroup(buf, offset, limit, startField) {
+  const parts = [];
+  while (offset < limit) {
+    const tag = readProtoVarintNumber(buf, offset, limit);
+    if (!tag || tag.value === 0) return null;
+    offset = tag.offset;
+    const wire = tag.value & 7;
+    const field = Math.floor(tag.value / 8);
+    if (!field) return null;
+    if (wire === 4) {
+      if (field !== startField) return null;
+      return { offset, sig: `group:${parts.join(',')}` };
+    }
+    const skipped = skipProtoValue(buf, offset, limit, wire, field);
+    if (!skipped) return null;
+    offset = skipped.offset;
+    parts.push(`${field}:${wire}:${skipped.sig}`);
+  }
+  return null;
+}
+
+function skipProtoValue(buf, offset, limit, wire, field) {
+  if (wire === 0) {
+    const next = skipProtoVarint(buf, offset, limit);
+    return next === null ? null : { offset: next, sig: 'v' };
+  }
+  if (wire === 1) {
+    if (offset + 8 > limit) return null;
+    return { offset: offset + 8, sig: 'fixed64' };
+  }
+  if (wire === 2) {
+    const len = readProtoVarintNumber(buf, offset, limit);
+    if (!len) return null;
+    const next = len.offset + len.value;
+    if (next > limit) return null;
+    return { offset: next, sig: String(len.value) };
+  }
+  if (wire === 3) return skipProtoGroup(buf, offset, limit, field);
+  if (wire === 5) {
+    if (offset + 4 > limit) return null;
+    return { offset: offset + 4, sig: 'fixed32' };
+  }
+  return null;
+}
+
+function parseProtoFieldStream(buf, start = 0, end = buf.length) {
+  let offset = start;
+  const parts = [];
+  const wireCounts = { 0: 0, 1: 0, 2: 0, 3: 0, 5: 0 };
+  while (offset < end) {
+    const tag = readProtoVarintNumber(buf, offset, end);
+    if (!tag || tag.value === 0) return null;
+    offset = tag.offset;
+    const wire = tag.value & 7;
+    const field = Math.floor(tag.value / 8);
+    if (!field || wire === 4 || wireCounts[wire] === undefined) return null;
+    const skipped = skipProtoValue(buf, offset, end, wire, field);
+    if (!skipped) return null;
+    offset = skipped.offset;
+    wireCounts[wire]++;
+    parts.push(`${field}:${wire}:${skipped.sig}`);
+  }
+  return { fields: parts.length, wireCounts, fingerprint: parts.join('|') };
+}
+
+function parseDelimitedProtoStream(buf) {
+  let offset = 0;
+  const parts = [];
+  while (offset < buf.length) {
+    const len = readProtoVarintNumber(buf, offset);
+    if (!len) return null;
+    offset = len.offset;
+    const end = offset + len.value;
+    if (end > buf.length) return null;
+    const inner = len.value === 0 ? { fields: 0, fingerprint: '' } : parseProtoFieldStream(buf, offset, end);
+    if (!inner) return null;
+    parts.push(`${len.value}:${inner.fields}:${inner.fingerprint}`);
+    offset = end;
+  }
+  return parts.length ? { records: parts.length, fingerprint: parts.join('|') } : null;
+}
+
+/**
+ * Best-effort protobuf wire-structure fingerprint. It never looks at string
+ * contents; it only records field numbers, wire types, and length-delimited
+ * sizes. A UUID->UUID rewrite should leave this unchanged.
+ */
+function protobufStructureFingerprint(buf) {
+  const delimited = parseDelimitedProtoStream(buf);
+  if (delimited && delimited.records > 1) {
+    return {
+      kind: 'length-delimited protobuf stream',
+      count: delimited.records,
+      fingerprint: 'delimited|' + delimited.fingerprint,
+    };
+  }
+  const message = parseProtoFieldStream(buf);
+  if (message && message.fields) {
+    return {
+      kind: 'protobuf message',
+      count: message.fields,
+      fingerprint: 'message|' + message.fingerprint,
+    };
+  }
+  if (delimited) {
+    return {
+      kind: 'length-delimited protobuf stream',
+      count: delimited.records,
+      fingerprint: 'delimited|' + delimited.fingerprint,
+    };
+  }
+  return null;
+}
+
+function describeProtoStructure(structure) {
+  if (!structure) return 'unrecognized protobuf structure';
+  if (structure.kind.includes('stream')) return `${structure.count} protobuf record(s)`;
+  return `${structure.count} protobuf field(s)`;
+}
+
+function parseProtoFieldsWithData(buf, start = 0, end = buf.length) {
+  let offset = start;
+  const fields = [];
+  while (offset < end) {
+    const tag = readProtoVarintNumber(buf, offset, end);
+    if (!tag || tag.value === 0) return null;
+    offset = tag.offset;
+    const wire = tag.value & 7;
+    const field = Math.floor(tag.value / 8);
+    if (!field || wire === 4) return null;
+    let dataStart = offset;
+    let dataEnd = offset;
+    if (wire === 0) {
+      const next = skipProtoVarint(buf, offset, end);
+      if (next === null) return null;
+      dataEnd = next;
+      offset = next;
+    } else if (wire === 1) {
+      dataEnd = offset + 8;
+      if (dataEnd > end) return null;
+      offset = dataEnd;
+    } else if (wire === 2) {
+      const len = readProtoVarintNumber(buf, offset, end);
+      if (!len) return null;
+      dataStart = len.offset;
+      dataEnd = dataStart + len.value;
+      if (dataEnd > end) return null;
+      offset = dataEnd;
+    } else if (wire === 3) {
+      const group = skipProtoGroup(buf, offset, end, field);
+      if (!group) return null;
+      dataEnd = group.offset;
+      offset = group.offset;
+    } else if (wire === 5) {
+      dataEnd = offset + 4;
+      if (dataEnd > end) return null;
+      offset = dataEnd;
+    } else {
+      return null;
+    }
+    fields.push({ field, wire, data: buf.subarray(dataStart, dataEnd) });
+  }
+  return fields;
+}
+
+function isTextUuid(s) {
+  return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(s);
+}
+
+function incMap(map, key, by = 1) {
+  map.set(key, (map.get(key) || 0) + by);
+}
+
+function summarizeProtoUuidPaths(buf, projectIds, maxDepth = 6) {
+  const projectSet = new Set(projectIds.map((id) => String(id).toLowerCase()));
+  const uuidPaths = new Map();
+  const projectPaths = new Map();
+  const walk = (chunk, prefix, depth) => {
+    if (depth > maxDepth || !chunk.length) return;
+    const fields = parseProtoFieldsWithData(chunk);
+    if (!fields) return;
+    for (const f of fields) {
+      const p = prefix ? `${prefix}.${f.field}/${f.wire}` : `${f.field}/${f.wire}`;
+      if (f.wire !== 2) continue;
+      const s = f.data.toString('ascii');
+      if (isTextUuid(s)) {
+        incMap(uuidPaths, p);
+        if (projectSet.has(s.toLowerCase())) incMap(projectPaths, p);
+      }
+      walk(f.data, p, depth + 1);
+    }
+  };
+  walk(buf, '', 0);
+  return { uuidPaths, projectPaths };
+}
+
+function quoteSqliteIdent(name) {
+  return '"' + String(name).replace(/"/g, '""') + '"';
+}
+
+function sqliteProjectUuidLocations(dbFiles, projectIds) {
+  let DatabaseSync;
+  try { ({ DatabaseSync } = require('node:sqlite')); } catch (_) { return null; }
+  const locations = new Map();
+  const needles = projectIds.map((id) => Buffer.from(id, 'ascii'));
+  for (const dbPath of dbFiles) {
+    let db;
+    try {
+      db = new DatabaseSync(dbPath, { readOnly: true });
+      const tables = db.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+      ).all();
+      for (const t of tables) {
+        const table = t.name;
+        const cols = db.prepare(`PRAGMA table_info(${quoteSqliteIdent(table)})`).all();
+        for (const col of cols) {
+          const type = String(col.type || '').toLowerCase();
+          if (type && !/(text|blob|char|clob|varchar)/.test(type)) continue;
+          const tableSql = quoteSqliteIdent(table);
+          const colSql = quoteSqliteIdent(col.name);
+          const stmt = db.prepare(`SELECT COUNT(*) AS c FROM ${tableSql} WHERE instr(${colSql}, ?) > 0`);
+          let rowsInDb = 0;
+          for (const needle of needles) {
+            const row = stmt.get(needle);
+            rowsInDb += Number((row && row.c) || 0);
+          }
+          if (rowsInDb) {
+            const key = `${table}.${col.name}`;
+            const cur = locations.get(key) || { dbs: 0, rows: 0 };
+            cur.dbs++;
+            cur.rows += rowsInDb;
+            locations.set(key, cur);
+          }
+        }
+      }
+    } catch (_) {
+      /* skip unreadable/locked db */
+    } finally {
+      try { if (db) db.close(); } catch (_) { /* ignore */ }
+    }
+  }
+  return locations;
 }
 
 /** Locate a `sqlite3` CLI on PATH, or null. Best-effort, cross-platform. */
@@ -431,6 +708,66 @@ function resolveConversationsDir(projectsDir, flags) {
 /** The .gemini base dir, derived from the projects dir. */
 function geminiBaseDir(projectsDir) {
   return path.dirname(path.dirname(projectsDir)); // .../.gemini
+}
+
+function resolveAgyhubSummariesFile(projectsDir, flags) {
+  const override = flags['agyhub-summaries'] || flags.agyhub;
+  if (override && typeof override === 'string') return override;
+  return path.join(geminiBaseDir(projectsDir), 'antigravity', 'agyhub_summaries_proto.pb');
+}
+
+function planAgyhubSummariesUpdate(filePath, remap) {
+  if (!isFile(filePath)) return null;
+  let buf;
+  try { buf = fs.readFileSync(filePath); } catch (_) { return null; }
+  const edits = [];
+  let refs = 0;
+  for (const [dupId, keepId] of remap) {
+    const count = countAsciiInBuffer(buf, dupId);
+    if (count) {
+      edits.push({ from: dupId, to: keepId, count });
+      refs += count;
+    }
+  }
+  if (!edits.length) return null;
+  return {
+    file: path.basename(filePath),
+    full: filePath,
+    size: buf.length,
+    edits,
+    refs,
+    structure: protobufStructureFingerprint(buf),
+  };
+}
+
+function applyAgyhubSummariesUpdate(plan) {
+  const original = fs.readFileSync(plan.full);
+  const before = protobufStructureFingerprint(original);
+  if (!before) throw new Error('could not verify protobuf structure before editing');
+  const buf = Buffer.from(original);
+  let made = 0;
+  for (const e of plan.edits) made += replaceAsciiInBuffer(buf, e.from, e.to);
+  if (made !== plan.refs) {
+    throw new Error(`expected ${plan.refs} UUID replacement(s), made ${made}`);
+  }
+  if (buf.length !== original.length) throw new Error('size changed in memory');
+  const after = protobufStructureFingerprint(buf);
+  if (!after || after.fingerprint !== before.fingerprint) {
+    throw new Error('protobuf structure changed after UUID rewrite');
+  }
+  writeFileAtomic(plan.full, buf);
+  const written = fs.readFileSync(plan.full);
+  if (written.length !== original.length) throw new Error('written size mismatch');
+  const writtenStructure = protobufStructureFingerprint(written);
+  if (!writtenStructure || writtenStructure.fingerprint !== before.fingerprint) {
+    throw new Error('protobuf structure changed on disk after write');
+  }
+  for (const e of plan.edits) {
+    if (countAsciiInBuffer(written, e.from) !== 0) {
+      throw new Error('duplicate project UUID still present after write');
+    }
+  }
+  return { made, structure: before };
 }
 
 /** Electron user-data dir for Antigravity (holds globalStorage/workspaceStorage). */
@@ -618,7 +955,7 @@ async function cmdConsolidate(dir, flags) {
 
 // Merge: re-point chats from duplicate projects onto one keeper per folder,
 // THEN remove the duplicate project entries. No chat is deleted — only the
-// project UUID embedded inside each chat database is rewritten to the keeper.
+// stored project UUID pointer is rewritten to the keeper.
 async function cmdMerge(dir, flags) {
   const { groups, entries } = cmdScan(dir, { quietHint: true });
   if (!entries.length) return;
@@ -648,10 +985,10 @@ async function cmdMerge(dir, flags) {
   } catch (_) {
     console.log(yellow(`\n  Conversations folder not found at:\n  ${convDir}`));
     console.log(
-      dim('  Can\'t re-point chats. Pass the right path with --conversations <path>,\n') +
+      dim('  No SQLite chat DBs will be scanned. Pass the right path with --conversations <path>,\n') +
       dim('  or run `diagnose` to see where things live.\n')
     );
-    return;
+    dbFiles = [];
   }
 
   // Plan, per chat. We scan BOTH the .db AND its sibling .db-wal for the
@@ -679,20 +1016,36 @@ async function cmdMerge(dir, flags) {
     if (edits.length) plan.push({ db, dbPath, walPath, walSize, edits });
   }
 
+  const agyhubFile = resolveAgyhubSummariesFile(dir, flags);
+  const agyhubPlan = planAgyhubSummariesUpdate(agyhubFile, remap);
+  const targetParts = [];
+  if (plan.length) targetParts.push(`${plan.length} chat DB(s)`);
+  if (agyhubPlan) targetParts.push(`${agyhubPlan.refs} agyhub summary reference(s)`);
+  const targetSummary = targetParts.length ? targetParts.join(' and ') : '0 chat/project reference(s)';
+
   const apply = flags.apply;
   console.log(
     (apply ? bold('\n  Will re-point ') : bold('\n  [dry-run] would re-point ')) +
-      cyan(`${plan.length} chat(s)`) +
+      cyan(targetSummary) +
       ` to their keeper project, then remove up to ` +
       red(`${dupCount}`) +
       ` duplicate entr${dupCount === 1 ? 'y' : 'ies'}.\n`
   );
 
+  if (agyhubPlan) {
+    const structure = agyhubPlan.structure;
+    const structureMsg = structure ? describeProtoStructure(structure) : 'structure not recognized yet';
+    console.log(dim(`  Found ${agyhubPlan.refs} duplicate project UUID reference(s) in ${agyhubPlan.file} (${structureMsg}).`));
+    if (!structure) {
+      console.log(yellow('  Apply will refuse to edit that protobuf file unless its wire structure can be verified.'));
+    }
+  }
+
   // A2 — fail-safe when nothing is detected. Do NOT imply consolidate is safe.
-  if (!plan.length) {
-    console.log(yellow('  Detected 0 chats linked to the duplicates by the text-UUID method.'));
+  if (!plan.length && !agyhubPlan) {
+    console.log(yellow('  Detected 0 chats/project references linked to the duplicates by known methods.'));
     console.log(dim('  That can mean there genuinely are none — OR that your machine stores the'));
-    console.log(dim('  chat→project link differently (e.g. 16-byte binary, or elsewhere).'));
+    console.log(dim('  chat→project link differently (e.g. 16-byte binary, or another file).'));
     console.log(red('  Do NOT assume `consolidate` is safe yet') + dim(' — it could unlink chats.'));
     console.log(dim('  Run `diagnose` and share the output so we can support your setup:\n'));
     console.log(dim('    npx antigravity-projects-fix diagnose\n'));
@@ -728,24 +1081,31 @@ async function cmdMerge(dir, flags) {
     console.log(dim(`  Using ${engine.kind} to checkpoint WALs.`));
   }
 
-  if (!(await confirm(flags, `\n  Re-point ${plan.length} chat(s) and remove duplicate project(s)?`))) {
+  if (!(await confirm(flags, `\n  Re-point ${targetSummary} and remove duplicate project(s)?`))) {
     console.log(dim('  Cancelled.\n'));
     return;
   }
 
-  // Back up the project registry AND each affected chat's .db/.db-wal/.db-shm.
+  // Back up the project registry, affected chat DB files, and agyhub summary file.
   let chatBackupDir = null;
+  let agyhubBackupDir = null;
   if (!flags['no-backup']) {
     const pdest = backup(dir);
     console.log(dim(`  Backup (projects): ${pdest}`));
-    const chatFiles = [];
-    for (const p of plan) {
-      for (const ext of ['', '-wal', '-shm']) {
-        if (fs.existsSync(p.dbPath + ext)) chatFiles.push(p.db + ext);
+    if (plan.length) {
+      const chatFiles = [];
+      for (const p of plan) {
+        for (const ext of ['', '-wal', '-shm']) {
+          if (fs.existsSync(p.dbPath + ext)) chatFiles.push(p.db + ext);
+        }
       }
+      chatBackupDir = backupFiles(convDir, chatFiles, 'merge');
+      console.log(dim(`  Backup (chats):    ${chatBackupDir}`));
     }
-    chatBackupDir = backupFiles(convDir, chatFiles, 'merge');
-    console.log(dim(`  Backup (chats):    ${chatBackupDir}`));
+    if (agyhubPlan) {
+      agyhubBackupDir = backupSingleFile(agyhubPlan.full, 'agyhub');
+      console.log(dim(`  Backup (agyhub):   ${agyhubBackupDir}`));
+    }
   }
 
   // Apply per chat: checkpoint (if WAL) → length-preserving byte-edit (atomic)
@@ -782,12 +1142,34 @@ async function cmdMerge(dir, flags) {
     console.log(yellow(`\n  ${failed.length} chat(s) could not be re-pointed (restored from backup):`));
     for (const f of failed) console.log(dim(`    ${f.chat} — ${f.reason}`));
   }
-  console.log(green(`  Re-pointed ${edited} chat(s).`));
+  if (plan.length) console.log(green(`  Re-pointed ${edited} chat DB(s).`));
+
+  let agyhubFailed = null;
+  if (agyhubPlan) {
+    try {
+      const result = applyAgyhubSummariesUpdate(agyhubPlan);
+      console.log(
+        green(`  Updated ${result.made} agyhub summary reference(s).`) +
+        dim(` Verified ${describeProtoStructure(result.structure)} before/after.`)
+      );
+    } catch (err) {
+      agyhubFailed = err;
+      if (agyhubBackupDir) {
+        const backupFile = path.join(agyhubBackupDir, path.basename(agyhubPlan.full));
+        if (fs.existsSync(backupFile)) {
+          try { fs.copyFileSync(backupFile, agyhubPlan.full); } catch (_) { /* best effort */ }
+        }
+      }
+      console.log(yellow(`\n  Could not update ${agyhubPlan.file} (restored from backup):`));
+      console.log(dim(`    ${err.message}`));
+    }
+  }
 
   // Only remove a duplicate entry if NO chat that referenced it failed —
   // otherwise removing it would orphan those chats.
   const unsafeDups = new Set();
   for (const f of failed) for (const e of f.edits) unsafeDups.add(e.from);
+  if (agyhubFailed) for (const e of agyhubPlan.edits) unsafeDups.add(e.from);
   const toDelete = [];
   for (const list of groups.values()) {
     for (let i = 1; i < list.length; i++) {
@@ -800,7 +1182,7 @@ async function cmdMerge(dir, flags) {
   }
   console.log(green(`  Removed ${removed} duplicate project entr${removed === 1 ? 'y' : 'ies'}.`));
   if (unsafeDups.size) {
-    console.log(yellow(`  Kept ${unsafeDups.size} duplicate(s) whose chats couldn't be re-pointed (so they stay accessible).`));
+    console.log(yellow(`  Kept ${unsafeDups.size} duplicate(s) whose references couldn't be re-pointed (so they stay accessible).`));
   }
   console.log(dim('  Reopen Antigravity — your chats should now sit under one project.\n'));
 }
@@ -877,12 +1259,17 @@ function cmdRestore(backupDir, dir, flags) {
   }
   // Route each backed-up file to the right place by type: project registry
   // files (.json) go to the projects folder; chat databases (.db / .db-wal /
-  // .db-shm) go to the conversations folder. This handles both the plain
-  // `*.backup-*` (projects) and the `conversations.merge-backup-*` (chats).
+  // .db-shm) go to the conversations folder, and the agyhub summaries protobuf
+  // goes to the Antigravity data folder. This handles project, chat, and agyhub
+  // backup folders created by merge/consolidate/purge.
   const convDir = resolveConversationsDir(dir, flags);
+  const agyhubFile = resolveAgyhubSummariesFile(dir, flags);
+  const agyhubDir = path.dirname(agyhubFile);
+  const agyhubName = path.basename(agyhubFile).toLowerCase();
   const files = fs.readdirSync(backupDir);
   let proj = 0;
   let chat = 0;
+  let agyhub = 0;
   for (const f of files) {
     const src = path.join(backupDir, f);
     if (!fs.statSync(src).isFile()) continue;
@@ -890,14 +1277,18 @@ function cmdRestore(backupDir, dir, flags) {
     let target = null;
     if (lower.endsWith('.json')) target = dir;
     else if (/\.(db|db-wal|db-shm)$/.test(lower)) target = convDir;
+    else if (lower === agyhubName || lower === 'agyhub_summaries_proto.pb') target = agyhubDir;
     if (!target) continue;
     fs.mkdirSync(target, { recursive: true });
     fs.copyFileSync(src, path.join(target, f));
-    if (target === dir) proj++; else chat++;
+    if (target === dir) proj++;
+    else if (target === agyhubDir) agyhub++;
+    else chat++;
   }
   const parts = [];
   if (proj) parts.push(`${proj} project file(s) → ${dir}`);
   if (chat) parts.push(`${chat} chat file(s) → ${convDir}`);
+  if (agyhub) parts.push(`${agyhub} agyhub file(s) → ${agyhubDir}`);
   if (!parts.length) {
     console.log(yellow(`\n  Nothing recognizable to restore in ${backupDir}\n`));
     return;
@@ -955,6 +1346,7 @@ function cmdDiagnose(dir, flags) {
   const probeIds = usingDups ? dupIds : entries.map((e) => e.id).filter(Boolean);
 
   const convDir = resolveConversationsDir(dir, flags);
+  const agyhubFile = resolveAgyhubSummariesFile(dir, flags);
   const base = geminiBaseDir(dir);
   const brainDir = path.join(base, 'antigravity', 'brain');
   const userDir = electronUserDir();
@@ -964,6 +1356,7 @@ function cmdDiagnose(dir, flags) {
   const exists = (p) => { try { return fs.existsSync(p); } catch (_) { return false; } };
   console.log(`    projects   : ${redactHome(dir)}  (${entries.length} entries, ${groups.size} folders, ${dupIds.length} duplicates)`);
   console.log(`    conversations : ${exists(convDir) ? 'FOUND' : 'NOT FOUND'}  ${redactHome(convDir)}`);
+  console.log(`    agyhub summaries: ${exists(agyhubFile) ? 'FOUND' : 'NOT FOUND'}  ${redactHome(agyhubFile)}`);
   console.log(`    brain      : ${exists(brainDir) ? 'FOUND' : 'NOT FOUND'}`);
   console.log(`    state.vscdb: ${exists(stateDb) ? 'FOUND' : 'NOT FOUND'}`);
   console.log(`    workspaceStorage: ${exists(wsStorage) ? 'FOUND' : 'NOT FOUND'}`);
@@ -1008,6 +1401,8 @@ function cmdDiagnose(dir, flags) {
   };
   const dbFiles = exists(convDir) ? walkFiles(convDir, ['.db'], CAP) : [];
   const walFiles = exists(convDir) ? walkFiles(convDir, ['.db-wal'], CAP) : [];
+  const convPbFiles = exists(convDir) ? walkFiles(convDir, ['.pb'], CAP) : [];
+  const agyhubFiles = exists(agyhubFile) ? [agyhubFile] : [];
   const brainFiles = exists(brainDir) ? walkFiles(brainDir, null, CAP) : [];
   const brainDirNames = exists(brainDir) ? (() => { try { return fs.readdirSync(brainDir); } catch (_) { return []; } })() : [];
   const stateFiles = exists(stateDb) ? [stateDb] : [];
@@ -1028,15 +1423,54 @@ function cmdDiagnose(dir, flags) {
   };
   line('conversations/*.db', dbFiles);
   line('conversations/*.db-wal', walFiles);
+  line('conversations/*.pb', convPbFiles);
+  line('agyhub_summaries_proto.pb', agyhubFiles);
   line('brain/** (file contents)', brainFiles);
   line('state.vscdb', stateFiles);
   line('workspaceStorage/**', wsFiles);
   console.log('    ' + 'brain/<id> dir names'.padEnd(28) + `${brainDirMatches} match(es)`);
+  if (agyhubFiles.length) {
+    let structure = null;
+    try { structure = protobufStructureFingerprint(fs.readFileSync(agyhubFile)); } catch (_) { /* ignore */ }
+    console.log('    ' + 'agyhub protobuf'.padEnd(28) + describeProtoStructure(structure));
+  }
 
   // --- folder-path linkage (alternative theory) ---
   const fp = scanFilesFor(dbFiles, folderNeedles);
+  const fpConvPb = scanFilesFor(convPbFiles, folderNeedles);
+  const fpAgyhub = scanFilesFor(agyhubFiles, folderNeedles);
   console.log(bold('\n  Folder-path linkage (alternative)'));
   console.log(`    conversations/*.db containing the project folder path: ${fp.filesWith} file(s)`);
+  console.log(`    conversations/*.pb containing the project folder path: ${fpConvPb.filesWith} file(s)`);
+  console.log(`    agyhub_summaries_proto.pb containing the project folder path: ${fpAgyhub.filesWith} file(s)`);
+
+  // --- structured hints ---
+  console.log(bold('\n  Structured link hints'));
+  const sqliteLocations = dbFiles.length && probeIds.length ? sqliteProjectUuidLocations(dbFiles, probeIds) : new Map();
+  if (sqliteLocations === null) {
+    console.log(dim('    conversations SQLite: skipped (node:sqlite unavailable in this Node runtime)'));
+  } else if (sqliteLocations.size) {
+    for (const [key, value] of [...sqliteLocations.entries()].sort()) {
+      console.log(`    conversations SQLite ${key}: ${value.dbs} db(s), ${value.rows} row-hit(s)`);
+    }
+  } else {
+    console.log(dim('    conversations SQLite: no structured table/column hit'));
+  }
+  if (agyhubFiles.length) {
+    let paths = null;
+    try { paths = summarizeProtoUuidPaths(fs.readFileSync(agyhubFile), probeIds); } catch (_) { /* ignore */ }
+    if (paths && paths.projectPaths.size) {
+      for (const [key, count] of [...paths.projectPaths.entries()].sort()) {
+        console.log(`    agyhub project UUID path ${key}: ${count} hit(s)`);
+      }
+    } else if (paths && paths.uuidPaths.size) {
+      console.log(dim('    agyhub protobuf: UUIDs found, but none matched the probed project ids'));
+    } else {
+      console.log(dim('    agyhub protobuf: no structured UUID path hit'));
+    }
+  } else {
+    console.log(dim('    agyhub protobuf: file not found'));
+  }
 
   // --- verdict ---
   console.log(bold('\n  Where the chat→project link most likely lives:'));
@@ -1046,14 +1480,15 @@ function cmdDiagnose(dir, flags) {
     const b = scanFilesFor(files, binNeedles).occ;
     if (t || b) hits.push(`${label} (${t ? 'text' : ''}${t && b ? '+' : ''}${b ? 'binary' : ''})`);
   };
-  note('conversations', [...dbFiles, ...walFiles]);
+  note('conversations', [...dbFiles, ...walFiles, ...convPbFiles]);
+  note('agyhub_summaries_proto.pb', agyhubFiles);
   note('brain', brainFiles);
   note('state.vscdb', stateFiles);
   note('workspaceStorage', wsFiles);
   if (brainDirMatches) hits.push('brain dir names');
   if (hits.length) {
     console.log(green('    → ' + hits.join(', ')));
-  } else if (fp.filesWith) {
+  } else if (fp.filesWith || fpConvPb.filesWith || fpAgyhub.filesWith) {
     console.log(yellow('    → not by project id; chats reference the FOLDER PATH instead.'));
   } else {
     console.log(red('    → no link found by id or folder path. Please mention your Antigravity version.'));
@@ -1240,8 +1675,8 @@ ${bold('COMMANDS')}
   interactive, i       Checkbox UI — pick exactly which entries to delete
   consolidate          Keep one entry per folder, remove the duplicates
   merge                Re-point chats onto one keeper, then remove duplicates
-                       ${dim('(no chat deleted; --apply needs Node >=22 or sqlite3')}
-                       ${dim(' to safely checkpoint WALs — experimental)')}
+                       ${dim('(no chat deleted; SQLite needed only for pending')}
+                       ${dim(' WAL checkpointing - experimental)')}
   purge                Remove every project entry (clean slate)
   restore <dir>        Copy project files back from a backup folder
   diagnose, doctor     Read-only: show where chats link to projects on your
@@ -1260,6 +1695,8 @@ ${bold('OPTIONS')}
                        ${dim('(default: ~/.gemini/config/projects)')}
   --conversations <path>  Override the chats folder for ${cyan('merge')}
                        ${dim('(default: ~/.gemini/antigravity/conversations)')}
+  --agyhub-summaries <path>
+                       Override agyhub_summaries_proto.pb for ${cyan('merge')} / ${cyan('diagnose')}
   --no-color           Disable colored output
   -h, --help           Show this help
   -v, --version        Show version

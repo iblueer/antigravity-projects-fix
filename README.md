@@ -261,16 +261,21 @@ How it works, and why it's safe:
   the `.db-wal` directly would **corrupt** the chat. `merge` therefore **checkpoints**
   the WAL into the main `.db` first (folding it in safely), then rewrites the UUID
   **in place** in the `.db` — same 36 characters, so the byte length never changes.
-- After each write it runs SQLite's `integrity_check`; if a chat doesn't come back
-  clean it's **restored from backup automatically** and its project is kept.
+- On Antigravity **2.0.1** (reported on macOS), the chat→project pointer may instead
+  live in `~/.gemini/antigravity/agyhub_summaries_proto.pb`. `merge` scans that file
+  too, rewrites duplicate UUID strings to the keeper UUID, and verifies the protobuf
+  wire structure before and after the write.
+- After each SQLite database write it runs SQLite's `integrity_check`; if a chat
+  doesn't come back clean it's **restored from backup automatically** and its
+  project is kept.
 - **No chat is ever deleted.** Only its "belongs to project" pointer changes.
 - Checkpointing needs a SQLite engine: **Node ≥ 22** (built‑in `node:sqlite`) or a
   **`sqlite3` CLI** on your PATH. If neither is available and a chat has a pending
   WAL, `merge --apply` **refuses rather than risk corruption** — your data is left
   untouched.
-- The project registry **and** every chat file it touches are backed up first
-  (`consolidate`'s backup + a `conversations.merge-backup-…` folder). `restore`
-  puts either back.
+- The project registry, every chat file it touches, and the agyhub protobuf file
+  (when used) are backed up first (`projects.backup-…`, `conversations.merge-backup-…`,
+  and `antigravity.agyhub-backup-…`). `restore` puts them back.
 - Antigravity must be **closed** (the databases are otherwise locked).
 
 > 🧪 **Experimental.** `merge` reverse‑engineers Antigravity's on‑disk format
@@ -281,9 +286,9 @@ How it works, and why it's safe:
 > `consolidate`. Feedback welcome in
 > [Discussions](https://github.com/ryukenshin546-a11y/antigravity-projects-fix/discussions).
 
-> ⚠️ **If `merge` reports "0 chats" but you *do* have chats under the duplicates**,
+> ⚠️ **If `merge` reports "0 chats/project references" but you *do* have chats under the duplicates**,
 > the link between chats and projects on your machine is stored differently than
-> `merge` currently detects. **Don't run `consolidate` yet** — it would unlink those
+> `merge` currently detects. **Don't run `consolidate` yet** — it could unlink those
 > chats from the sidebar (they're not deleted, and `restore` brings them back).
 > Instead run the read‑only `diagnose` command and share the output so we can fix
 > `merge` for your setup:
@@ -291,6 +296,11 @@ How it works, and why it's safe:
 > ```bash
 > npx antigravity-projects-fix diagnose
 > ```
+
+`diagnose` now reports both broad byte-level hits and structured hints when the
+runtime can read them, such as the SQLite table/column (`trajectory_metadata_blob.data`)
+or the agyhub protobuf field path that contains the project UUID. It still prints
+counts only — no project paths, UUID values, or chat text.
 
 ### Options
 
@@ -302,6 +312,7 @@ How it works, and why it's safe:
 | `--force`                | Skip the "is Antigravity running?" safety check                       |
 | `--dir <path>`           | Override the projects folder (otherwise it's [auto-detected](#-where-are-the-files-auto-detect)) |
 | `--conversations <path>` | Override the chats folder for `merge` (default `~/.gemini/antigravity/conversations`) |
+| `--agyhub-summaries <path>` | Override the agyhub summaries protobuf file for `merge` / `diagnose` |
 | `--no-color`             | Disable colored output                                                |
 | `-h, --help`             | Show help                                                             |
 | `-v, --version`          | Show version                                                          |
@@ -421,10 +432,11 @@ re‑synced from the server. In that case you can:
   if you want those chats re‑homed under the surviving project instead. With
   `consolidate`/`purge`, **your conversation data itself** (in
   `~/.gemini/antigravity/conversations`) **is never touched.**
-- `merge` is **experimental** — it edits chat databases via a length‑preserving
-  UUID rewrite (reverse‑engineered, validated on synthetic data and Windows).
-  It never deletes a chat and backs every file up first, but treat it with the
-  same care: dry‑run, keep the backup, `restore` if needed.
+- `merge` is **experimental** — it edits chat databases and, on setups that use it,
+  `agyhub_summaries_proto.pb` via length‑preserving UUID rewrites
+  (reverse‑engineered, validated on synthetic data and Windows plus macOS user
+  diagnostics). It never deletes a chat and backs every file up first, but treat
+  it with the same care: dry‑run, keep the backup, `restore` if needed.
 - **Tested on Windows only.** macOS (Apple Silicon & Intel) and Linux use the same
   code paths (`~/.gemini`, `pgrep`) and *should* work — but they are **unverified on
   real hardware.** On those systems, treat it as experimental: run `scan` first,
