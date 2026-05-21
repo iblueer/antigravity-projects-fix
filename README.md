@@ -137,8 +137,10 @@ Point the tool at your machine and let it report the damage first:
 <img src="assets/scan-terminal.svg" alt="Terminal output of the scan command, grouping 58 project files into 5 real folders with 53 duplicates" width="80%"/>
 </div>
 
-Then `consolidate --apply` to keep one entry per folder (a backup is made first),
-or `purge --apply` for a clean slate.
+Then `merge --apply` to keep one entry per folder **and keep chats grouped**
+(a backup is made first). If you only care about cleaning up the Projects list
+and don't need old chats re‑homed, use `consolidate --apply` instead — or
+`purge --apply` for a clean slate.
 
 ## 📦 Installation
 
@@ -180,12 +182,12 @@ npx antigravity-projects-fix <command> [options]
 | Your goal                                          | Command                  |
 | -------------------------------------------------- | ------------------------ |
 | Just look — change nothing                         | `scan`                   |
-| Keep my projects, drop only the duplicates         | `consolidate --apply`    |
+| Keep my projects, drop duplicates, and I don't need old chats grouped | `consolidate --apply` |
 | Drop duplicates **and keep all my chats grouped**  | `merge --apply`          |
 | Choose exactly what to delete / keep               | `interactive`            |
 | **Delete everything — start fresh**                | `purge --apply`          |
 | Undo a previous run                                | `restore <backup-dir>`   |
-| `merge` found 0 chats / not sure what's safe       | `diagnose`               |
+| `merge` found 0 chats/project references / not sure what's safe | `diagnose` |
 
 > All destructive commands are **dry‑run by default**, make an **automatic backup**,
 > and **ask for confirmation** before deleting. Close Antigravity first.
@@ -199,7 +201,7 @@ npx antigravity-projects-fix <command> [options]
 | `consolidate`      | Keep **one** entry per folder, remove the duplicates           |
 | `merge`            | Re‑point chats onto one keeper, **then** remove duplicates — no chat deleted |
 | `purge`            | Remove **every** project entry (clean slate)                   |
-| `restore <dir>`    | Copy project (or chat) files back from a backup folder        |
+| `restore <dir>`    | Copy project, chat, or agyhub backup files back               |
 | `diagnose`, `doctor` | **Read‑only** — report where chats link to projects on your machine (safe to share) |
 
 ### Interactive mode (recommended)
@@ -254,17 +256,20 @@ npx antigravity-projects-fix merge --apply
 
 How it works, and why it's safe:
 
-- Each chat is a separate **SQLite database** in `~/.gemini/antigravity/conversations`,
-  with the project it belongs to stored **inside** as a 36‑character UUID.
+- On many machines, each chat is a separate **SQLite database** in
+  `~/.gemini/antigravity/conversations`, with the project it belongs to stored
+  **inside** as a 36‑character UUID.
 - Antigravity keeps a large **persistent write‑ahead log** (`.db-wal`) next to each
   chat, and the live value often lives there. WAL frames are checksummed, so editing
   the `.db-wal` directly would **corrupt** the chat. `merge` therefore **checkpoints**
   the WAL into the main `.db` first (folding it in safely), then rewrites the UUID
   **in place** in the `.db` — same 36 characters, so the byte length never changes.
-- On Antigravity **2.0.1** (reported on macOS), the chat→project pointer may instead
-  live in `~/.gemini/antigravity/agyhub_summaries_proto.pb`. `merge` scans that file
-  too, rewrites duplicate UUID strings to the keeper UUID, and verifies the protobuf
-  wire structure before and after the write.
+- Antigravity **2.0.1** can also keep conversation summaries as
+  `~/.gemini/antigravity/conversations/*.pb` and/or mirror the chat→project pointer
+  in `~/.gemini/antigravity/agyhub_summaries_proto.pb`.
+- `merge` scans the SQLite chat DBs and the agyhub summaries file, rewrites whichever
+  duplicate project UUID references it finds, and verifies the agyhub protobuf wire
+  structure before and after the write.
 - After each SQLite database write it runs SQLite's `integrity_check`; if a chat
   doesn't come back clean it's **restored from backup automatically** and its
   project is kept.
@@ -445,8 +450,11 @@ re‑synced from the server. In that case you can:
 ## ❓ FAQ
 
 **How do I remove duplicate projects in Google Antigravity 2.0?**
-Run `npx antigravity-projects-fix scan` to see the duplicates, then `npx antigravity-projects-fix consolidate --apply`
-to keep one entry per folder. A backup is made automatically. See [Usage](#-usage).
+Run `npx antigravity-projects-fix scan` to see the duplicates, then use
+`npx antigravity-projects-fix merge --apply` if you want to keep chats grouped
+under one surviving project. If you only want to clean up the Projects list and
+don't need old chats re‑homed, use `npx antigravity-projects-fix consolidate --apply`.
+A backup is made automatically. See [Usage](#-usage).
 
 **Why does my Antigravity sidebar show the same project many times (`MyApp 2`, `MyApp 3` …)?**
 Antigravity 2.0 identifies each workspace by a generated UUID instead of by its
@@ -454,10 +462,12 @@ folder path, and the migration keeps minting a new UUID for the same folder.
 See [Why does it happen?](#-why-does-it-happen).
 
 **Is it safe? Will it delete my code or conversations?**
-It only edits the project **registry** files (`~/.gemini/config/projects`). Your
-code and your conversation history are never touched, every destructive action is
-dry‑run by default, and a full backup is made before anything is deleted. See [Safety](#-safety).
-(The one command that *touches* chat files is [`merge`](#merge--keep-your-chats-grouped-under-one-project) — and even then it only rewrites a UUID pointer, never deletes a chat, and backs each file up first.)
+It never touches your source code, and it never deletes conversation content.
+`consolidate` and `purge` edit only the project **registry** files
+(`~/.gemini/config/projects`). [`merge`](#merge--keep-your-chats-grouped-under-one-project)
+also rewrites the stored project pointer in chat DBs and, on some setups,
+`agyhub_summaries_proto.pb` — but it never deletes a chat and backs each touched
+file up first. Every destructive action is dry‑run by default. See [Safety](#-safety).
 
 **My duplicate projects each have their own chats — can I keep the chats and group them under one project?**
 Yes — that's exactly what [`merge`](#merge--keep-your-chats-grouped-under-one-project) does.
