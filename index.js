@@ -37,9 +37,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const readline = require('readline');
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
 
-const VERSION = '1.5.0';
+const VERSION = '1.6.0';
 
 // ---------------------------------------------------------------- ANSI color
 const useColor =
@@ -254,12 +254,22 @@ function isAntigravityRunning() {
       });
       return /Antigravity\.exe/i.test(out);
     }
-    const out = execSync('pgrep -i antigravity || true', {
-      encoding: 'utf8',
-      shell: '/bin/sh',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    return out.trim().length > 0;
+    // Match by process NAME (not full command line) so this tool's own path —
+    // which contains "antigravity" — never counts as a false positive.
+    const sh = (cmd) => {
+      try {
+        return execSync(cmd, { encoding: 'utf8', shell: '/bin/sh', stdio: ['ignore', 'pipe', 'ignore'] });
+      } catch (_) {
+        return '';
+      }
+    };
+    const pg = sh('pgrep -i antigravity 2>/dev/null || true');
+    if (pg.trim()) return true;
+    // Fallback when pgrep is missing: match the command name column only.
+    const ps = sh('ps -A -o comm= 2>/dev/null | grep -i antigravity | grep -iv grep || true');
+    if (ps.trim()) return true;
+    // If neither tool produced usable output, we genuinely can't tell.
+    return pg === '' && ps === '' ? null : false;
   } catch (_) {
     return null; // could not determine
   }
@@ -339,6 +349,73 @@ function countAsciiInBuffer(buf, needle) {
   return count;
 }
 
+/** Write a Buffer to `dest` atomically: write a temp sibling, then rename over. */
+function writeFileAtomic(dest, buf) {
+  const tmp = dest + '.agfix-tmp';
+  fs.writeFileSync(tmp, buf);
+  fs.renameSync(tmp, dest);
+}
+
+/** Locate a `sqlite3` CLI on PATH, or null. Best-effort, cross-platform. */
+function findSqlite3Binary() {
+  const probe = process.platform === 'win32' ? 'where sqlite3' : 'command -v sqlite3 2>/dev/null';
+  try {
+    const out = execSync(probe, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const first = out.split(/\r?\n/)[0].trim();
+    return first && fs.existsSync(first) ? first : (first || null);
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * A SQLite "checkpointer" — the only safe way to fold a persistent WAL into the
+ * main .db before we byte-edit it. Antigravity keeps large persistent WAL files
+ * (verified: multi-MB, tens of thousands of frames), and a WAL's frames are
+ * checksummed, so raw-editing the .db-wal would corrupt the chat database.
+ *
+ * Prefers Node's built-in `node:sqlite` (Node >= 22, no install). Falls back to
+ * a `sqlite3` CLI if present. Returns null when neither is available — callers
+ * must then REFUSE to edit rather than risk corruption.
+ */
+function getCheckpointer() {
+  // 1. Built-in node:sqlite (Node >= 22; may require the runtime to expose it).
+  try {
+    const { DatabaseSync } = require('node:sqlite');
+    // smoke-test that it actually constructs (some builds need a flag)
+    return {
+      kind: 'node:sqlite',
+      checkpoint(dbPath) {
+        const db = new DatabaseSync(dbPath);
+        try { db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get(); }
+        finally { db.close(); }
+      },
+      integrity(dbPath) {
+        const db = new DatabaseSync(dbPath);
+        try {
+          const r = db.prepare('PRAGMA integrity_check').get();
+          return (r && (r.integrity_check || r['integrity_check'])) || 'unknown';
+        } finally { db.close(); }
+      },
+    };
+  } catch (_) { /* fall through */ }
+
+  // 2. sqlite3 CLI.
+  const bin = findSqlite3Binary();
+  if (bin) {
+    return {
+      kind: 'sqlite3',
+      checkpoint(dbPath) {
+        execFileSync(bin, [dbPath, 'PRAGMA wal_checkpoint(TRUNCATE);'], { stdio: ['ignore', 'ignore', 'pipe'] });
+      },
+      integrity(dbPath) {
+        return execFileSync(bin, [dbPath, 'PRAGMA integrity_check;'], { encoding: 'utf8' }).trim().split(/\r?\n/)[0];
+      },
+    };
+  }
+  return null;
+}
+
 /**
  * Locate the conversations folder. Chats live next to the project registry:
  *   <base>/.gemini/config/projects   ←  projectsDir
@@ -390,14 +467,19 @@ function walkFiles(dir, exts, cap, out = []) {
 
 /**
  * Count how many of `files` contain at least one of the `needles` (Buffers),
- * plus the total number of occurrences. Read-only.
+ * plus the total number of occurrences. Read-only. Files larger than `maxBytes`
+ * are skipped (and counted) so a huge artifact can't blow up memory.
  */
-function scanFilesFor(files, needles) {
+function scanFilesFor(files, needles, maxBytes = 64 * 1024 * 1024) {
   let filesWith = 0;
   let occ = 0;
+  let skipped = 0;
   for (const f of files) {
     let buf;
-    try { buf = fs.readFileSync(f); } catch (_) { continue; }
+    try {
+      if (fs.statSync(f).size > maxBytes) { skipped++; continue; }
+      buf = fs.readFileSync(f);
+    } catch (_) { continue; }
     let found = false;
     for (const n of needles) {
       if (!n || !n.length) continue;
@@ -410,7 +492,7 @@ function scanFilesFor(files, needles) {
     }
     if (found) filesWith++;
   }
-  return { filesWith, occ };
+  return { filesWith, occ, skipped };
 }
 
 function ask(question) {
@@ -443,7 +525,7 @@ async function guardRunning(flags) {
 }
 
 // ---------------------------------------------------------------- commands
-function cmdScan(dir) {
+function cmdScan(dir, opts = {}) {
   const { error, entries, broken } = readProjects(dir);
   if (error === 'missing') {
     console.log(yellow(`\n  No projects folder found at:\n  ${dir}`));
@@ -487,15 +569,15 @@ function cmdScan(dir) {
       (dupes ? red(`${dupes} duplicate(s)`) : green('no duplicates')) +
       '\n'
   );
-  if (dupes) {
+  if (dupes && !opts.quietHint) {
     console.log(dim('  Run with `consolidate --apply` to keep one entry per folder,'));
-    console.log(dim('  or `purge --apply` to remove every project entry.\n'));
+    console.log(dim('  or `merge --apply` to also keep your chats grouped.\n'));
   }
   return { groups, entries };
 }
 
 async function cmdConsolidate(dir, flags) {
-  const { groups, entries } = cmdScan(dir);
+  const { groups, entries } = cmdScan(dir, { quietHint: true });
   if (!entries.length) return;
   const toDelete = [];
   for (const list of groups.values()) {
@@ -538,7 +620,7 @@ async function cmdConsolidate(dir, flags) {
 // THEN remove the duplicate project entries. No chat is deleted — only the
 // project UUID embedded inside each chat database is rewritten to the keeper.
 async function cmdMerge(dir, flags) {
-  const { groups, entries } = cmdScan(dir);
+  const { groups, entries } = cmdScan(dir, { quietHint: true });
   if (!entries.length) return;
 
   // dupId -> keeperId, for every non-keeper entry in each folder group.
@@ -558,110 +640,168 @@ async function cmdMerge(dir, flags) {
     return;
   }
 
-  // Find the conversations folder and the chat databases inside it.
+  // Find the conversations folder and its chat databases (.db files).
   const convDir = resolveConversationsDir(dir, flags);
-  let convFiles;
+  let dbFiles;
   try {
-    convFiles = fs.readdirSync(convDir).filter((f) => /\.(db|db-wal)$/i.test(f));
+    dbFiles = fs.readdirSync(convDir).filter((f) => f.toLowerCase().endsWith('.db'));
   } catch (_) {
     console.log(yellow(`\n  Conversations folder not found at:\n  ${convDir}`));
     console.log(
-      dim('  Can\'t re-point chats. Use `consolidate` to just remove duplicates,\n') +
-      dim('  or pass the right path with --conversations <path>.\n')
+      dim('  Can\'t re-point chats. Pass the right path with --conversations <path>,\n') +
+      dim('  or run `diagnose` to see where things live.\n')
     );
     return;
   }
 
-  // Plan: which files reference a duplicate UUID, and how many times.
+  // Plan, per chat. We scan BOTH the .db AND its sibling .db-wal for the
+  // duplicate UUID, because Antigravity keeps large persistent WALs and the
+  // live value may live only in the WAL. The actual EDIT always targets the
+  // .db after the WAL has been folded in via checkpoint.
   const plan = [];
-  for (const f of convFiles) {
-    const full = path.join(convDir, f);
-    let buf;
-    try { buf = fs.readFileSync(full); } catch (_) { continue; }
+  for (const db of dbFiles) {
+    const dbPath = path.join(convDir, db);
+    const walPath = dbPath + '-wal';
+    let dbBuf;
+    try { dbBuf = fs.readFileSync(dbPath); } catch (_) { continue; }
+    let walSize = 0;
+    let walBuf = Buffer.alloc(0);
+    try {
+      const st = fs.statSync(walPath);
+      if (st.isFile() && st.size > 0) { walSize = st.size; walBuf = fs.readFileSync(walPath); }
+    } catch (_) { /* no wal */ }
     const edits = [];
     for (const [dupId, keepId] of remap) {
-      const c = countAsciiInBuffer(buf, dupId);
-      if (c) edits.push({ from: dupId, to: keepId, count: c });
+      if (countAsciiInBuffer(dbBuf, dupId) || (walSize && countAsciiInBuffer(walBuf, dupId))) {
+        edits.push({ from: dupId, to: keepId });
+      }
     }
-    if (edits.length) plan.push({ file: f, full, edits, size: buf.length });
+    if (edits.length) plan.push({ db, dbPath, walPath, walSize, edits });
   }
-
-  const chatsAffected = new Set(plan.map((p) => p.file.replace(/\.(db|db-wal)$/i, ''))).size;
-  const totalRefs = plan.reduce((s, p) => s + p.edits.reduce((a, e) => a + e.count, 0), 0);
 
   const apply = flags.apply;
   console.log(
     (apply ? bold('\n  Will re-point ') : bold('\n  [dry-run] would re-point ')) +
-      cyan(`${chatsAffected} chat(s)`) +
-      ` (${totalRefs} reference${totalRefs === 1 ? '' : 's'}) to their keeper project, then remove ` +
+      cyan(`${plan.length} chat(s)`) +
+      ` to their keeper project, then remove up to ` +
       red(`${dupCount}`) +
       ` duplicate entr${dupCount === 1 ? 'y' : 'ies'}.\n`
   );
+
+  // A2 — fail-safe when nothing is detected. Do NOT imply consolidate is safe.
   if (!plan.length) {
-    console.log(
-      dim('  No chats reference the duplicate projects — `consolidate` would be enough here.\n')
-    );
+    console.log(yellow('  Detected 0 chats linked to the duplicates by the text-UUID method.'));
+    console.log(dim('  That can mean there genuinely are none — OR that your machine stores the'));
+    console.log(dim('  chat→project link differently (e.g. 16-byte binary, or elsewhere).'));
+    console.log(red('  Do NOT assume `consolidate` is safe yet') + dim(' — it could unlink chats.'));
+    console.log(dim('  Run `diagnose` and share the output so we can support your setup:\n'));
+    console.log(dim('    npx antigravity-projects-fix diagnose\n'));
+    return;
   }
+
   console.log(dim('  Chats are never deleted — only their "belongs to project" pointer changes.'));
+  const pendingWal = plan.filter((p) => p.walSize > 0).length;
+  if (pendingWal) {
+    console.log(dim(`  ${pendingWal} of ${plan.length} chat(s) have a pending WAL that must be checkpointed first.`));
+  }
   if (!apply) {
     console.log(dim('  Re-run with --apply to perform it.\n'));
     return;
   }
 
   await guardRunning(flags);
-  if (
-    !(await confirm(
-      flags,
-      `\n  Re-point ${chatsAffected} chat(s) and remove ${dupCount} duplicate project(s)?`
-    ))
-  ) {
+
+  // A WAL must be folded into the .db before we can safely byte-edit it.
+  // Editing a .db-wal directly corrupts the chat database (frames are
+  // checksummed). If any chat has a pending WAL, we need a SQLite engine.
+  let engine = null;
+  if (pendingWal > 0) {
+    engine = getCheckpointer();
+    if (!engine) {
+      console.log(red('\n  Cannot merge safely: some chats have pending WAL data that must be'));
+      console.log(red('  checkpointed first, and no SQLite engine is available to do it.'));
+      console.log(dim('  Editing WAL files directly would corrupt your chats, so I won\'t.'));
+      console.log(dim('  Fix: run with Node ≥ 22 (built-in SQLite) or install the `sqlite3` CLI,'));
+      console.log(dim('  then re-run `merge --apply`. Nothing was changed.\n'));
+      return;
+    }
+    console.log(dim(`  Using ${engine.kind} to checkpoint WALs.`));
+  }
+
+  if (!(await confirm(flags, `\n  Re-point ${plan.length} chat(s) and remove duplicate project(s)?`))) {
     console.log(dim('  Cancelled.\n'));
     return;
   }
 
-  // Back up the project registry AND every chat file we're about to touch.
+  // Back up the project registry AND each affected chat's .db/.db-wal/.db-shm.
+  let chatBackupDir = null;
   if (!flags['no-backup']) {
     const pdest = backup(dir);
     console.log(dim(`  Backup (projects): ${pdest}`));
-    if (plan.length) {
-      const cdest = backupFiles(convDir, plan.map((p) => p.file), 'merge');
-      console.log(dim(`  Backup (chats):    ${cdest}`));
+    const chatFiles = [];
+    for (const p of plan) {
+      for (const ext of ['', '-wal', '-shm']) {
+        if (fs.existsSync(p.dbPath + ext)) chatFiles.push(p.db + ext);
+      }
     }
+    chatBackupDir = backupFiles(convDir, chatFiles, 'merge');
+    console.log(dim(`  Backup (chats):    ${chatBackupDir}`));
   }
 
-  // Rewrite the embedded UUIDs — length-preserving, with a size assertion.
+  // Apply per chat: checkpoint (if WAL) → length-preserving byte-edit (atomic)
+  // → integrity check. On any failure, restore that chat from backup.
   let edited = 0;
   const failed = [];
   for (const p of plan) {
     try {
-      const buf = fs.readFileSync(p.full);
+      if (p.walSize > 0) engine.checkpoint(p.dbPath); // folds WAL into .db, truncates WAL
+      const buf = fs.readFileSync(p.dbPath);
       const before = buf.length;
-      for (const e of p.edits) replaceAsciiInBuffer(buf, e.from, e.to);
-      if (buf.length !== before) throw new Error(`size changed in memory (${before} → ${buf.length})`);
-      fs.writeFileSync(p.full, buf);
-      if (fs.statSync(p.full).size !== before) throw new Error('written size mismatch');
+      let made = 0;
+      for (const e of p.edits) made += replaceAsciiInBuffer(buf, e.from, e.to);
+      if (made === 0) throw new Error('UUID not found in .db after checkpoint (different storage?)');
+      if (buf.length !== before) throw new Error('size changed in memory');
+      writeFileAtomic(p.dbPath, buf);
+      if (fs.statSync(p.dbPath).size !== before) throw new Error('written size mismatch');
+      if (engine) {
+        const integ = engine.integrity(p.dbPath);
+        if (integ !== 'ok') throw new Error('integrity_check failed: ' + integ);
+      }
       edited++;
     } catch (err) {
-      failed.push({ file: p.file, reason: err.message });
+      failed.push({ chat: p.db, reason: err.message, edits: p.edits });
+      if (chatBackupDir) {
+        for (const ext of ['', '-wal', '-shm']) {
+          const b = path.join(chatBackupDir, p.db + ext);
+          if (fs.existsSync(b)) { try { fs.copyFileSync(b, p.dbPath + ext); } catch (_) { /* best effort */ } }
+        }
+      }
     }
   }
   if (failed.length) {
-    console.log(yellow(`\n  Warning: ${failed.length} chat file(s) could not be re-pointed:`));
-    for (const f of failed) console.log(dim(`    ${f.file} — ${f.reason}`));
-    console.log(dim('  Restore from the chat backup above if the result looks wrong.'));
+    console.log(yellow(`\n  ${failed.length} chat(s) could not be re-pointed (restored from backup):`));
+    for (const f of failed) console.log(dim(`    ${f.chat} — ${f.reason}`));
   }
-  console.log(green(`  Re-pointed ${edited} file(s).`));
+  console.log(green(`  Re-pointed ${edited} chat(s).`));
 
-  // Now remove the duplicate project entries (backup already taken above).
+  // Only remove a duplicate entry if NO chat that referenced it failed —
+  // otherwise removing it would orphan those chats.
+  const unsafeDups = new Set();
+  for (const f of failed) for (const e of f.edits) unsafeDups.add(e.from);
   const toDelete = [];
   for (const list of groups.values()) {
-    for (let i = 1; i < list.length; i++) toDelete.push(list[i]);
+    for (let i = 1; i < list.length; i++) {
+      if (!unsafeDups.has(list[i].id)) toDelete.push(list[i]);
+    }
   }
   let removed = 0;
   for (const e of toDelete) {
-    try { fs.rmSync(e.full, { force: true }); removed++; } catch (_) { /* reported below */ }
+    try { fs.rmSync(e.full, { force: true }); removed++; } catch (_) { /* ignore */ }
   }
   console.log(green(`  Removed ${removed} duplicate project entr${removed === 1 ? 'y' : 'ies'}.`));
+  if (unsafeDups.size) {
+    console.log(yellow(`  Kept ${unsafeDups.size} duplicate(s) whose chats couldn't be re-pointed (so they stay accessible).`));
+  }
   console.log(dim('  Reopen Antigravity — your chats should now sit under one project.\n'));
 }
 
@@ -681,6 +821,11 @@ async function cmdPurge(dir, flags) {
     (apply ? bold('\n  Will remove ') : bold('\n  [dry-run] would remove ')) +
       red(`ALL ${entries.length}`) +
       ` project entr${entries.length === 1 ? 'y' : 'ies'}.\n`
+  );
+  console.log(
+    yellow('  Note: ') +
+      dim('this unlinks EVERY chat from the sidebar (chats are not deleted, just\n') +
+      dim('  orphaned). A backup is made, so `restore <backup-dir>` brings it all back.\n')
   );
   if (!apply) {
     console.log(dim('  Re-run with --apply to perform it.\n'));
@@ -1095,7 +1240,8 @@ ${bold('COMMANDS')}
   interactive, i       Checkbox UI — pick exactly which entries to delete
   consolidate          Keep one entry per folder, remove the duplicates
   merge                Re-point chats onto one keeper, then remove duplicates
-                       ${dim('(no chat is deleted — experimental)')}
+                       ${dim('(no chat deleted; --apply needs Node >=22 or sqlite3')}
+                       ${dim(' to safely checkpoint WALs — experimental)')}
   purge                Remove every project entry (clean slate)
   restore <dir>        Copy project files back from a backup folder
   diagnose, doctor     Read-only: show where chats link to projects on your

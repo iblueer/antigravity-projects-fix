@@ -254,22 +254,32 @@ npx antigravity-projects-fix merge --apply
 
 How it works, and why it's safe:
 
-- Each chat is a separate database in `~/.gemini/antigravity/conversations`. The
-  project it belongs to is stored **inside** that file as a 36‑character UUID.
-- `merge` rewrites that UUID **in place** to the keeper's UUID. Because both are
-  exactly 36 characters, the file's byte length never changes — the database stays
-  structurally intact (verified with a size assertion after every write).
+- Each chat is a separate **SQLite database** in `~/.gemini/antigravity/conversations`,
+  with the project it belongs to stored **inside** as a 36‑character UUID.
+- Antigravity keeps a large **persistent write‑ahead log** (`.db-wal`) next to each
+  chat, and the live value often lives there. WAL frames are checksummed, so editing
+  the `.db-wal` directly would **corrupt** the chat. `merge` therefore **checkpoints**
+  the WAL into the main `.db` first (folding it in safely), then rewrites the UUID
+  **in place** in the `.db` — same 36 characters, so the byte length never changes.
+- After each write it runs SQLite's `integrity_check`; if a chat doesn't come back
+  clean it's **restored from backup automatically** and its project is kept.
 - **No chat is ever deleted.** Only its "belongs to project" pointer changes.
-- Both the project registry **and** every chat file it touches are backed up first
+- Checkpointing needs a SQLite engine: **Node ≥ 22** (built‑in `node:sqlite`) or a
+  **`sqlite3` CLI** on your PATH. If neither is available and a chat has a pending
+  WAL, `merge --apply` **refuses rather than risk corruption** — your data is left
+  untouched.
+- The project registry **and** every chat file it touches are backed up first
   (`consolidate`'s backup + a `conversations.merge-backup-…` folder). `restore`
   puts either back.
 - Antigravity must be **closed** (the databases are otherwise locked).
 
 > 🧪 **Experimental.** `merge` reverse‑engineers Antigravity's on‑disk format
-> (there's no official API for this), and it's been validated on synthetic data
-> and on Windows. Run `merge` (the dry‑run) first, keep the automatic backups, and
-> if anything looks off, `restore` and fall back to `consolidate`. Feedback welcome
-> in [Discussions](https://github.com/ryukenshin546-a11y/antigravity-projects-fix/discussions).
+> (there's no official API for this). The checkpoint‑then‑edit mechanism is
+> verified on real chat databases and on Windows, but the chat↔project link is
+> stored differently on some machines (see below). Run `merge` (the dry‑run) first,
+> keep the automatic backups, and if anything looks off, `restore` and fall back to
+> `consolidate`. Feedback welcome in
+> [Discussions](https://github.com/ryukenshin546-a11y/antigravity-projects-fix/discussions).
 
 > ⚠️ **If `merge` reports "0 chats" but you *do* have chats under the duplicates**,
 > the link between chats and projects on your machine is stored differently than
