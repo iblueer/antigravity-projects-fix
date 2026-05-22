@@ -201,7 +201,7 @@ npx antigravity-projects-fix <command> [options]
 | `consolidate`      | Keep **one** entry per folder, remove the duplicates           |
 | `merge`            | Re‑point chats onto one keeper, **then** remove duplicates — no chat deleted |
 | `purge`            | Remove **every** project entry (clean slate)                   |
-| `restore <dir>`    | Copy project, chat, or agyhub backup files back               |
+| `restore <dir>`    | Copy project, chat, agyhub, or VS Code state backup files back |
 | `diagnose`, `doctor` | **Read‑only** — report where chats link to projects on your machine (safe to share) |
 
 ### Interactive mode (recommended)
@@ -267,9 +267,14 @@ How it works, and why it's safe:
 - Antigravity **2.0.1** can also keep conversation summaries as
   `~/.gemini/antigravity/conversations/*.pb` and/or mirror the chat→project pointer
   in `~/.gemini/antigravity/agyhub_summaries_proto.pb`.
-- `merge` scans the SQLite chat DBs, per-conversation protobuf files, and the
-  agyhub summaries file, rewrites whichever duplicate project UUID references it
-  finds, and verifies protobuf wire structure before and after each protobuf write.
+- On some builds, especially the current macOS reports, Antigravity also stores
+  trajectory summaries in the VS Code state database
+  (`globalStorage/state.vscdb` and sometimes `workspaceStorage/**/state.vscdb`) as
+  base64-encoded protobuf rows in `ItemTable`.
+- `merge` scans the SQLite chat DBs, per-conversation protobuf files, the agyhub
+  summaries file, and decoded `state.vscdb` protobuf rows. It rewrites whichever
+  duplicate project UUID references it finds and verifies protobuf wire structure
+  before and after each protobuf write.
 - After each SQLite database write it runs SQLite's `integrity_check`; if a chat
   doesn't come back clean it's **restored from backup automatically** and its
   project is kept.
@@ -278,9 +283,17 @@ How it works, and why it's safe:
   **`sqlite3` CLI** on your PATH. If neither is available and a chat has a pending
   WAL, `merge --apply` **refuses rather than risk corruption** — your data is left
   untouched.
-- The project registry, every chat file it touches, and the agyhub protobuf file
-  (when used) are backed up first (`projects.backup-…`, `conversations.merge-backup-…`,
-  and `antigravity.agyhub-backup-…`). `restore` puts them back.
+- Decoded `state.vscdb` scans/edits require **Node ≥ 22** because they use
+  Node's built-in `node:sqlite` reader.
+- If `merge` finds **only** `agyhub_summaries_proto.pb`, `merge --apply` now refuses
+  to delete duplicate project entries by default. That file can update the visible
+  list, but it may be only a summary/index; recent macOS reports show chats can
+  disappear again when opened if the authoritative state is elsewhere. Use
+  `diagnose` and share the output first.
+- The project registry, every chat file it touches, the agyhub protobuf file, and
+  decoded VS Code state DBs (when used) are backed up first (`projects.backup-…`,
+  `conversations.merge-backup-…`, `antigravity.agyhub-backup-…`, and
+  `User.state-backup-…`). `restore` puts them back.
 - Antigravity must be **closed** (the databases are otherwise locked).
 
 > 🧪 **Experimental.** `merge` reverse‑engineers Antigravity's on‑disk format
@@ -303,9 +316,10 @@ How it works, and why it's safe:
 > ```
 
 `diagnose` now reports both broad byte-level hits and structured hints when the
-runtime can read them, such as the SQLite table/column (`trajectory_metadata_blob.data`)
-or the agyhub protobuf field path that contains the project UUID. It still prints
-counts only — no project paths, UUID values, or chat text.
+runtime can read them, such as the SQLite table/column (`trajectory_metadata_blob.data`),
+the agyhub protobuf field path, or decoded `state.vscdb` `ItemTable` keys like
+`antigravityUnifiedStateSync.trajectorySummaries`. It still prints counts only —
+no project paths, UUID values, or chat text.
 
 ### Options
 
@@ -313,11 +327,13 @@ counts only — no project paths, UUID values, or chat text.
 | ------------------------ | --------------------------------------------------------------------- |
 | `--apply`                | Actually perform the change (`consolidate`/`merge`/`purge` preview without it) |
 | `-y, --yes`              | Skip the confirmation prompt                                           |
-| `--no-backup`            | Do not create a backup before deleting                                |
+| `--no-backup`            | Do not create a backup before changing files                          |
 | `--force`                | Skip the "is Antigravity running?" safety check                       |
 | `--dir <path>`           | Override the projects folder (otherwise it's [auto-detected](#-where-are-the-files-auto-detect)) |
 | `--conversations <path>` | Override the chats folder for `merge` (default `~/.gemini/antigravity/conversations`) |
 | `--agyhub-summaries <path>` | Override the agyhub summaries protobuf file for `merge` / `diagnose` |
+| `--user-data-dir <path>` | Override Antigravity's VS Code `User` data dir for decoded `state.vscdb` scans (or set `ANTIGRAVITY_USER_DATA_DIR`) |
+| `--allow-agyhub-only`    | Allow the legacy agyhub-summary-only merge behavior                    |
 | `--no-color`             | Disable colored output                                                |
 | `-h, --help`             | Show help                                                             |
 | `-v, --version`          | Show version                                                          |
@@ -404,19 +420,21 @@ then the oldest file.
 
 This tool is built to be hard to misuse:
 
-- **Dry‑run by default** — `consolidate` and `purge` only print a preview until
+- **Dry‑run by default** — `consolidate`, `merge`, and `purge` only print a preview until
   you add `--apply`.
-- **Automatic backup** — before deleting, the whole `projects` folder is copied to
-  `projects.backup-<timestamp>` right next to it (skip with `--no-backup`).
+- **Automatic backup** — before changing files, the project registry and every
+  touched chat/protobuf/state file are copied to timestamped backup folders (skip
+  with `--no-backup`).
 - **Backup must succeed first** — if the backup can't be written (disk full,
-  permissions), the tool **aborts before deleting anything** rather than risk
+  permissions), the tool **aborts before changing anything** rather than risk
   unprotected data.
 - **Won't fight the app** — it refuses to run while `Antigravity` is detected as
   running (override with `--force`). **Close Antigravity first.**
 - **Won't touch the wrong folder** — auto-detection only picks a directory that
   actually contains project files, and `--dir` is validated (it must be a real
   directory). Malformed JSON files are reported and skipped, never guessed at.
-- **Fully reversible** — `restore <backup-dir>` puts everything back.
+- **Fully reversible** — `restore <backup-dir>` puts project, chat, agyhub, and
+  VS Code state backups back.
 - **Offline** — it only touches local files and never makes a network request.
 
 ## ☁️ Will the duplicates come back? (cloud sync)
@@ -438,10 +456,14 @@ re‑synced from the server. In that case you can:
   `consolidate`/`purge`, **your conversation data itself** (in
   `~/.gemini/antigravity/conversations`) **is never touched.**
 - `merge` is **experimental** — it edits chat databases and, on setups that use them,
-  `conversations/*.pb` plus `agyhub_summaries_proto.pb` via length‑preserving UUID rewrites
-  (reverse‑engineered, validated on synthetic data and Windows plus macOS user
-  diagnostics). It never deletes a chat and backs every file up first, but treat
-  it with the same care: dry‑run, keep the backup, `restore` if needed.
+  `conversations/*.pb`, `agyhub_summaries_proto.pb`, and decoded `state.vscdb`
+  protobuf rows via length‑preserving UUID rewrites (reverse‑engineered, validated
+  on synthetic data and Windows plus macOS user diagnostics). It never deletes a
+  chat and backs every file up first, but treat it with the same care: dry‑run,
+  keep the backup, `restore` if needed.
+- An **agyhub-only** result is not enough evidence that chats are safely re-homed.
+  In that case `merge --apply` will not delete duplicate project entries unless
+  you explicitly pass `--allow-agyhub-only`.
 - **Tested on Windows only.** macOS (Apple Silicon & Intel) and Linux use the same
   code paths (`~/.gemini`, `pgrep`) and *should* work — but they are **unverified on
   real hardware.** On those systems, treat it as experimental: run `scan` first,
@@ -466,9 +488,9 @@ It never touches your source code, and it never deletes conversation content.
 `consolidate` and `purge` edit only the project **registry** files
 (`~/.gemini/config/projects`). [`merge`](#merge--keep-your-chats-grouped-under-one-project)
 also rewrites the stored project pointer in chat DBs and, on some setups,
-`conversations/*.pb` / `agyhub_summaries_proto.pb` — but it never deletes a chat
-and backs each touched file up first. Every destructive action is dry‑run by
-default. See [Safety](#-safety).
+`conversations/*.pb`, `agyhub_summaries_proto.pb`, or decoded `state.vscdb`
+protobuf rows — but it never deletes a chat and backs each touched file up first.
+Every destructive action is dry‑run by default. See [Safety](#-safety).
 
 **My duplicate projects each have their own chats — can I keep the chats and group them under one project?**
 Yes — that's exactly what [`merge`](#merge--keep-your-chats-grouped-under-one-project) does.
@@ -477,6 +499,8 @@ removes the duplicate entries: `npx antigravity-projects-fix merge --apply`.
 
 **Can I undo it?**
 Yes — `npx antigravity-projects-fix restore <backup-dir>` restores from the automatic backup.
+For `merge`, there may be separate backups for projects, conversations, agyhub,
+and VS Code state; restore each one you need.
 
 **It says "No projects folder found" but I have the bug — what now?**
 Your install may live in a non-default location. The tool [auto-detects](#-where-are-the-files-auto-detect)

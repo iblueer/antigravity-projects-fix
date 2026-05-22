@@ -39,7 +39,7 @@ const path = require('path');
 const readline = require('readline');
 const { execSync, execFileSync } = require('child_process');
 
-const VERSION = '1.7.1';
+const VERSION = '1.7.2';
 
 // ---------------------------------------------------------------- ANSI color
 const useColor =
@@ -362,6 +362,46 @@ function countAsciiInBuffer(buf, needle) {
   return count;
 }
 
+function countNeedlesInBuffer(buf, needles) {
+  let count = 0;
+  for (const n of needles) {
+    if (!n || !n.length) continue;
+    let pos = 0;
+    for (;;) {
+      const i = buf.indexOf(n, pos);
+      if (i === -1) break;
+      count++;
+      pos = i + n.length;
+    }
+  }
+  return count;
+}
+
+function getNodeSqliteDatabaseSync() {
+  try { return require('node:sqlite').DatabaseSync; } catch (_) { return null; }
+}
+
+function decodeBase64Value(value) {
+  if (typeof value !== 'string') return null;
+  const raw = value.trim();
+  if (raw.length < 8 || raw.length % 4 === 1) return null;
+  if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(raw)) return null;
+  const standard = raw.replace(/-/g, '+').replace(/_/g, '/');
+  let buf;
+  try { buf = Buffer.from(standard, 'base64'); } catch (_) { return null; }
+  if (!buf.length) return null;
+  const repacked = buf.toString('base64').replace(/=+$/, '');
+  if (repacked !== standard.replace(/=+$/, '')) return null;
+  return buf;
+}
+
+function encodeBase64Like(buf, original) {
+  let encoded = buf.toString('base64');
+  if (typeof original === 'string' && !/=+$/.test(original.trim())) encoded = encoded.replace(/=+$/, '');
+  if (typeof original === 'string' && /[-_]/.test(original)) encoded = encoded.replace(/\+/g, '-').replace(/\//g, '_');
+  return encoded;
+}
+
 /** Write a Buffer to `dest` atomically: write a temp sibling, then rename over. */
 function writeFileAtomic(dest, buf) {
   const tmp = dest + '.agfix-tmp';
@@ -599,8 +639,8 @@ function quoteSqliteIdent(name) {
 }
 
 function sqliteProjectUuidLocations(dbFiles, projectIds) {
-  let DatabaseSync;
-  try { ({ DatabaseSync } = require('node:sqlite')); } catch (_) { return null; }
+  const DatabaseSync = getNodeSqliteDatabaseSync();
+  if (!DatabaseSync) return null;
   const locations = new Map();
   const needles = projectIds.map((id) => Buffer.from(id, 'ascii'));
   for (const dbPath of dbFiles) {
@@ -803,7 +843,9 @@ function planConversationPbUpdates(convDir, remap) {
 }
 
 /** Electron user-data dir for Antigravity (holds globalStorage/workspaceStorage). */
-function electronUserDir() {
+function electronUserDir(flags = {}) {
+  const override = flags['user-data-dir'] || process.env.ANTIGRAVITY_USER_DATA_DIR;
+  if (override && typeof override === 'string') return path.resolve(override);
   const home = os.homedir();
   if (process.platform === 'win32' && process.env.APPDATA) {
     return path.join(process.env.APPDATA, 'Antigravity', 'User');
@@ -812,6 +854,191 @@ function electronUserDir() {
     return path.join(home, 'Library', 'Application Support', 'Antigravity', 'User');
   }
   return path.join(home, '.config', 'Antigravity', 'User'); // linux default
+}
+
+function stateDisplayName(dbPath, userDir) {
+  const rel = path.relative(userDir, dbPath);
+  if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return rel.replace(/\\/g, '/');
+  return path.basename(dbPath);
+}
+
+function listStateVscdbFiles(userDir, cap = 5000) {
+  const files = [];
+  const globalState = path.join(userDir, 'globalStorage', 'state.vscdb');
+  if (isFile(globalState)) files.push(globalState);
+  const workspaceRoot = path.join(userDir, 'workspaceStorage');
+  if (fs.existsSync(workspaceRoot)) {
+    for (const f of walkFiles(workspaceRoot, ['.vscdb'], cap)) {
+      if (path.basename(f).toLowerCase() === 'state.vscdb') files.push(f);
+    }
+  }
+  return [...new Set(files)];
+}
+
+function scanStateVscdbDecoded(dbFiles, textNeedles, binNeedles, folderNeedles, projectIds, userDir) {
+  const DatabaseSync = getNodeSqliteDatabaseSync();
+  if (!DatabaseSync) return null;
+  const result = {
+    text: { filesWith: 0, occ: 0 },
+    binary: { filesWith: 0, occ: 0 },
+    folder: { filesWith: 0, occ: 0 },
+    rows: [],
+  };
+  for (const dbPath of dbFiles) {
+    let db;
+    let dbText = 0;
+    let dbBinary = 0;
+    let dbFolder = 0;
+    try {
+      db = new DatabaseSync(dbPath, { readOnly: true });
+      const rows = db.prepare('SELECT key, value FROM ItemTable WHERE typeof(value) = \'text\'').all();
+      for (const row of rows) {
+        const buf = decodeBase64Value(row.value);
+        if (!buf) continue;
+        const textHits = countNeedlesInBuffer(buf, textNeedles);
+        const binaryHits = countNeedlesInBuffer(buf, binNeedles);
+        const folderHits = countNeedlesInBuffer(buf, folderNeedles);
+        if (!textHits && !binaryHits && !folderHits) continue;
+        dbText += textHits;
+        dbBinary += binaryHits;
+        dbFolder += folderHits;
+        let paths = null;
+        try { paths = summarizeProtoUuidPaths(buf, projectIds); } catch (_) { /* ignore */ }
+        result.rows.push({
+          file: stateDisplayName(dbPath, userDir),
+          key: row.key,
+          textHits,
+          binaryHits,
+          folderHits,
+          bytes: buf.length,
+          structure: protobufStructureFingerprint(buf),
+          projectPaths: paths ? [...paths.projectPaths.entries()] : [],
+        });
+      }
+    } catch (_) {
+      /* skip unreadable/locked db */
+    } finally {
+      try { if (db) db.close(); } catch (_) { /* ignore */ }
+    }
+    if (dbText) result.text.filesWith++;
+    if (dbBinary) result.binary.filesWith++;
+    if (dbFolder) result.folder.filesWith++;
+    result.text.occ += dbText;
+    result.binary.occ += dbBinary;
+    result.folder.occ += dbFolder;
+  }
+  return result;
+}
+
+function planStateVscdbUpdates(dbFiles, remap, userDir) {
+  const DatabaseSync = getNodeSqliteDatabaseSync();
+  if (!DatabaseSync) return null;
+  const plans = [];
+  for (const dbPath of dbFiles) {
+    let db;
+    const rowsToUpdate = [];
+    try {
+      db = new DatabaseSync(dbPath, { readOnly: true });
+      const rows = db.prepare('SELECT key, value FROM ItemTable WHERE typeof(value) = \'text\'').all();
+      for (const row of rows) {
+        const buf = decodeBase64Value(row.value);
+        if (!buf) continue;
+        const edits = [];
+        let refs = 0;
+        for (const [dupId, keepId] of remap) {
+          const count = countAsciiInBuffer(buf, dupId);
+          if (count) {
+            edits.push({ from: dupId, to: keepId, count });
+            refs += count;
+          }
+        }
+        if (edits.length) {
+          rowsToUpdate.push({
+            key: row.key,
+            refs,
+            edits,
+            bytes: buf.length,
+            structure: protobufStructureFingerprint(buf),
+          });
+        }
+      }
+    } catch (_) {
+      /* skip unreadable/locked db */
+    } finally {
+      try { if (db) db.close(); } catch (_) { /* ignore */ }
+    }
+    if (rowsToUpdate.length) {
+      plans.push({
+        file: stateDisplayName(dbPath, userDir),
+        dbPath,
+        rows: rowsToUpdate,
+        refs: rowsToUpdate.reduce((sum, row) => sum + row.refs, 0),
+      });
+    }
+  }
+  return plans;
+}
+
+function applyStateVscdbUpdate(plan) {
+  const DatabaseSync = getNodeSqliteDatabaseSync();
+  if (!DatabaseSync) throw new Error('node:sqlite unavailable');
+  for (const row of plan.rows) {
+    if (!row.structure) throw new Error(`could not verify protobuf structure for ItemTable key ${row.key}`);
+  }
+  let db;
+  let made = 0;
+  try {
+    db = new DatabaseSync(plan.dbPath);
+    db.exec('BEGIN IMMEDIATE');
+    const getValue = db.prepare('SELECT value FROM ItemTable WHERE key = ?');
+    const updateValue = db.prepare('UPDATE ItemTable SET value = ? WHERE key = ?');
+    for (const row of plan.rows) {
+      const current = getValue.get(row.key);
+      const originalValue = current && current.value;
+      const original = decodeBase64Value(originalValue);
+      if (!original) throw new Error(`ItemTable key ${row.key} is no longer base64`);
+      const before = protobufStructureFingerprint(original);
+      if (!before) throw new Error(`could not verify protobuf structure for ItemTable key ${row.key}`);
+      const buf = Buffer.from(original);
+      let rowMade = 0;
+      for (const edit of row.edits) rowMade += replaceAsciiInBuffer(buf, edit.from, edit.to);
+      if (rowMade !== row.refs) throw new Error(`expected ${row.refs} UUID replacement(s) in ${row.key}, made ${rowMade}`);
+      if (buf.length !== original.length) throw new Error(`decoded size changed for ItemTable key ${row.key}`);
+      const after = protobufStructureFingerprint(buf);
+      if (!after || after.fingerprint !== before.fingerprint) {
+        throw new Error(`protobuf structure changed for ItemTable key ${row.key}`);
+      }
+      updateValue.run(encodeBase64Like(buf, originalValue), row.key);
+      made += rowMade;
+    }
+    db.exec('COMMIT');
+  } catch (err) {
+    try { if (db) db.exec('ROLLBACK'); } catch (_) { /* ignore */ }
+    throw err;
+  } finally {
+    try { if (db) db.close(); } catch (_) { /* ignore */ }
+  }
+
+  db = new DatabaseSync(plan.dbPath, { readOnly: true });
+  try {
+    const integrity = db.prepare('PRAGMA integrity_check').get();
+    const status = (integrity && (integrity.integrity_check || integrity['integrity_check'])) || 'unknown';
+    if (status !== 'ok') throw new Error('integrity_check failed: ' + status);
+    const getValue = db.prepare('SELECT value FROM ItemTable WHERE key = ?');
+    for (const row of plan.rows) {
+      const current = getValue.get(row.key);
+      const decoded = decodeBase64Value(current && current.value);
+      if (!decoded) throw new Error(`could not verify written ItemTable key ${row.key}`);
+      for (const edit of row.edits) {
+        if (countAsciiInBuffer(decoded, edit.from) !== 0) {
+          throw new Error(`duplicate project UUID still present in ItemTable key ${row.key}`);
+        }
+      }
+    }
+  } finally {
+    try { db.close(); } catch (_) { /* ignore */ }
+  }
+  return { made };
 }
 
 /** A standard 36-char UUID → its 16 raw bytes, or null if not a standard UUID. */
@@ -1056,10 +1283,16 @@ async function cmdMerge(dir, flags) {
   const convPbRefs = convPbPlans.reduce((sum, p) => sum + p.refs, 0);
   const agyhubFile = resolveAgyhubSummariesFile(dir, flags);
   const agyhubPlan = planAgyhubSummariesUpdate(agyhubFile, remap);
+  const userDir = electronUserDir(flags);
+  const stateDbFiles = listStateVscdbFiles(userDir);
+  const statePlansOrNull = planStateVscdbUpdates(stateDbFiles, remap, userDir);
+  const statePlans = statePlansOrNull || [];
+  const stateRefs = statePlans.reduce((sum, p) => sum + p.refs, 0);
   const targetParts = [];
   if (plan.length) targetParts.push(`${plan.length} chat DB(s)`);
   if (convPbPlans.length) targetParts.push(`${convPbRefs} conversation protobuf reference(s) in ${convPbPlans.length} file(s)`);
   if (agyhubPlan) targetParts.push(`${agyhubPlan.refs} agyhub summary reference(s)`);
+  if (statePlans.length) targetParts.push(`${stateRefs} decoded VS Code state reference(s) in ${statePlans.length} DB(s)`);
   const targetSummary = targetParts.length ? targetParts.join(' and ') : '0 chat/project reference(s)';
 
   const apply = flags.apply;
@@ -1086,12 +1319,43 @@ async function cmdMerge(dir, flags) {
       console.log(yellow(`  Apply will refuse to edit ${unverified} conversation protobuf file(s) unless their wire structure can be verified.`));
     }
   }
+  if (statePlansOrNull === null && stateDbFiles.length) {
+    console.log(yellow('  Could not inspect decoded state.vscdb protobuf rows because node:sqlite is unavailable.'));
+    console.log(dim('  Run with Node >= 22 to scan Antigravity\'s VS Code state store.'));
+  }
+  if (statePlans.length) {
+    const rowCount = statePlans.reduce((sum, p) => sum + p.rows.length, 0);
+    const unverified = statePlans.reduce((sum, p) => sum + p.rows.filter((row) => !row.structure).length, 0);
+    console.log(dim(`  Found ${stateRefs} duplicate project UUID reference(s) in ${rowCount} decoded state.vscdb protobuf row(s).`));
+    for (const p of statePlans) {
+      for (const row of p.rows.slice(0, 4)) {
+        console.log(dim(`    ${p.file} ItemTable[${row.key}] (${describeProtoStructure(row.structure)})`));
+      }
+      if (p.rows.length > 4) console.log(dim(`    ... ${p.rows.length - 4} more row(s)`));
+    }
+    if (unverified) {
+      console.log(yellow(`  Apply will refuse to edit ${unverified} decoded state row(s) unless their protobuf structure can be verified.`));
+    }
+  }
+
+  const onlyAgyhub = agyhubPlan && !plan.length && !convPbPlans.length && !statePlans.length;
+  if (onlyAgyhub) {
+    console.log(yellow('\n  Only agyhub summary references were found.'));
+    console.log(dim('  That file can affect the visible sidebar list, but recent macOS reports show'));
+    console.log(dim('  Antigravity may rebuild the real chat link from decoded state.vscdb/trajectory state'));
+    console.log(dim('  when a chat is opened. By default, apply will not delete duplicate project entries'));
+    console.log(dim('  from an agyhub-only match.'));
+    if (!flags['allow-agyhub-only']) {
+      console.log(dim('  Use --allow-agyhub-only only if you intentionally want the old summary-only behavior.\n'));
+      if (apply) return;
+    }
+  }
 
   // A2 — fail-safe when nothing is detected. Do NOT imply consolidate is safe.
-  if (!plan.length && !convPbPlans.length && !agyhubPlan) {
+  if (!plan.length && !convPbPlans.length && !agyhubPlan && !statePlans.length) {
     console.log(yellow('  Detected 0 chats/project references linked to the duplicates by known methods.'));
     console.log(dim('  That can mean there genuinely are none — OR that your machine stores the'));
-    console.log(dim('  chat→project link differently (e.g. 16-byte binary, or another file).'));
+    console.log(dim('  chat→project link differently (e.g. decoded state.vscdb, API state, or another file).'));
     console.log(red('  Do NOT assume `consolidate` is safe yet') + dim(' — it could unlink chats.'));
     console.log(dim('  Run `diagnose` and share the output so we can support your setup:\n'));
     console.log(dim('    npx antigravity-projects-fix diagnose\n'));
@@ -1104,7 +1368,11 @@ async function cmdMerge(dir, flags) {
     console.log(dim(`  ${pendingWal} of ${plan.length} chat(s) have a pending WAL that must be checkpointed first.`));
   }
   if (!apply) {
-    console.log(dim('  Re-run with --apply to perform it.\n'));
+    if (onlyAgyhub && !flags['allow-agyhub-only']) {
+      console.log(dim('  Re-run `diagnose` with Node >= 22, or use --allow-agyhub-only --apply for legacy summary-only behavior.\n'));
+    } else {
+      console.log(dim('  Re-run with --apply to perform it.\n'));
+    }
     return;
   }
 
@@ -1135,6 +1403,7 @@ async function cmdMerge(dir, flags) {
   // Back up the project registry, affected chat DB files, and agyhub summary file.
   let chatBackupDir = null;
   let agyhubBackupDir = null;
+  let stateBackupDir = null;
   if (!flags['no-backup']) {
     const pdest = backup(dir);
     console.log(dim(`  Backup (projects): ${pdest}`));
@@ -1152,6 +1421,20 @@ async function cmdMerge(dir, flags) {
     if (agyhubPlan) {
       agyhubBackupDir = backupSingleFile(agyhubPlan.full, 'agyhub');
       console.log(dim(`  Backup (agyhub):   ${agyhubBackupDir}`));
+    }
+    if (statePlans.length) {
+      const stateFiles = new Set();
+      for (const p of statePlans) {
+        const rel = path.relative(userDir, p.dbPath);
+        if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) continue;
+        for (const ext of ['', '-wal', '-shm']) {
+          if (fs.existsSync(p.dbPath + ext)) stateFiles.add(rel + ext);
+        }
+      }
+      if (stateFiles.size) {
+        stateBackupDir = backupFiles(userDir, [...stateFiles], 'state');
+        console.log(dim(`  Backup (state):    ${stateBackupDir}`));
+      }
     }
   }
 
@@ -1217,6 +1500,35 @@ async function cmdMerge(dir, flags) {
     console.log(green(`  Updated ${convPbRefsEdited} conversation protobuf reference(s) in ${convPbEdited} file(s).`));
   }
 
+  let stateEdited = 0;
+  let stateRefsEdited = 0;
+  const stateFailed = [];
+  for (const p of statePlans) {
+    try {
+      const result = applyStateVscdbUpdate(p);
+      stateEdited++;
+      stateRefsEdited += result.made;
+    } catch (err) {
+      stateFailed.push({ file: p.file, reason: err.message, rows: p.rows, plan: p });
+      if (stateBackupDir) {
+        const rel = path.relative(userDir, p.dbPath);
+        for (const ext of ['', '-wal', '-shm']) {
+          const backupFile = path.join(stateBackupDir, rel + ext);
+          if (fs.existsSync(backupFile)) {
+            try { fs.copyFileSync(backupFile, p.dbPath + ext); } catch (_) { /* best effort */ }
+          }
+        }
+      }
+    }
+  }
+  if (stateFailed.length) {
+    console.log(yellow(`\n  ${stateFailed.length} state.vscdb file(s) could not be re-pointed (restored from backup):`));
+    for (const f of stateFailed) console.log(dim(`    ${f.file} — ${f.reason}`));
+  }
+  if (statePlans.length) {
+    console.log(green(`  Updated ${stateRefsEdited} decoded VS Code state reference(s) in ${stateEdited} DB(s).`));
+  }
+
   let agyhubFailed = null;
   if (agyhubPlan) {
     try {
@@ -1243,6 +1555,7 @@ async function cmdMerge(dir, flags) {
   const unsafeDups = new Set();
   for (const f of failed) for (const e of f.edits) unsafeDups.add(e.from);
   for (const f of convPbFailed) for (const e of f.edits) unsafeDups.add(e.from);
+  for (const f of stateFailed) for (const row of f.rows) for (const e of row.edits) unsafeDups.add(e.from);
   if (agyhubFailed) for (const e of agyhubPlan.edits) unsafeDups.add(e.from);
   const toDelete = [];
   for (const list of groups.values()) {
@@ -1340,10 +1653,12 @@ function cmdRestore(backupDir, dir, flags) {
   const agyhubFile = resolveAgyhubSummariesFile(dir, flags);
   const agyhubDir = path.dirname(agyhubFile);
   const agyhubName = path.basename(agyhubFile).toLowerCase();
+  const userDir = electronUserDir(flags);
   const files = walkFiles(backupDir, null, Number.MAX_SAFE_INTEGER);
   let proj = 0;
   let chat = 0;
   let agyhub = 0;
+  let state = 0;
   for (const src of files) {
     const rel = path.relative(backupDir, src);
     const name = path.basename(src);
@@ -1352,6 +1667,10 @@ function cmdRestore(backupDir, dir, flags) {
     let outRel = name;
     if (lower.endsWith('.json')) target = dir;
     else if (lower === agyhubName || lower === 'agyhub_summaries_proto.pb') target = agyhubDir;
+    else if (/^state\.vscdb(?:-(?:wal|shm))?$/.test(lower)) {
+      target = userDir;
+      outRel = rel === name ? path.join('globalStorage', name) : rel;
+    }
     else if (/\.(db|db-wal|db-shm|pb)$/.test(lower)) { target = convDir; outRel = rel; }
     if (!target) continue;
     const dest = path.join(target, outRel);
@@ -1359,12 +1678,14 @@ function cmdRestore(backupDir, dir, flags) {
     fs.copyFileSync(src, dest);
     if (target === dir) proj++;
     else if (target === agyhubDir) agyhub++;
+    else if (target === userDir) state++;
     else chat++;
   }
   const parts = [];
   if (proj) parts.push(`${proj} project file(s) → ${dir}`);
   if (chat) parts.push(`${chat} chat file(s) → ${convDir}`);
   if (agyhub) parts.push(`${agyhub} agyhub file(s) → ${agyhubDir}`);
+  if (state) parts.push(`${state} state file(s) → ${userDir}`);
   if (!parts.length) {
     console.log(yellow(`\n  Nothing recognizable to restore in ${backupDir}\n`));
     return;
@@ -1425,7 +1746,7 @@ function cmdDiagnose(dir, flags) {
   const agyhubFile = resolveAgyhubSummariesFile(dir, flags);
   const base = geminiBaseDir(dir);
   const brainDir = path.join(base, 'antigravity', 'brain');
-  const userDir = electronUserDir();
+  const userDir = electronUserDir(flags);
   const stateDb = path.join(userDir, 'globalStorage', 'state.vscdb');
   const wsStorage = path.join(userDir, 'workspaceStorage');
 
@@ -1483,6 +1804,8 @@ function cmdDiagnose(dir, flags) {
   const brainDirNames = exists(brainDir) ? (() => { try { return fs.readdirSync(brainDir); } catch (_) { return []; } })() : [];
   const stateFiles = exists(stateDb) ? [stateDb] : [];
   const wsFiles = exists(wsStorage) ? walkFiles(wsStorage, null, CAP) : [];
+  const stateDbFiles = listStateVscdbFiles(userDir, CAP);
+  const decodedState = scanStateVscdbDecoded(stateDbFiles, textNeedles, binNeedles, folderNeedles, probeIds, userDir);
 
   const dupIdSet = new Set(probeIds);
   const brainDirMatches = brainDirNames.filter((n) => dupIdSet.has(n)).length;
@@ -1497,6 +1820,13 @@ function cmdDiagnose(dir, flags) {
       `${b.filesWith}f/${b.occ}h`
     );
   };
+  const countLine = (label, text, binary) => {
+    console.log(
+      '    ' + label.padEnd(28) +
+      `${text.filesWith}f/${text.occ}h`.padEnd(20) +
+      `${binary.filesWith}f/${binary.occ}h`
+    );
+  };
   line('conversations/*.db', dbFiles);
   line('conversations/*.db-wal', walFiles);
   line('conversations/*.pb', convPbFiles);
@@ -1504,6 +1834,11 @@ function cmdDiagnose(dir, flags) {
   line('brain/** (file contents)', brainFiles);
   line('state.vscdb', stateFiles);
   line('workspaceStorage/**', wsFiles);
+  if (decodedState === null && stateDbFiles.length) {
+    console.log('    ' + 'state.vscdb decoded'.padEnd(28) + 'skipped (node:sqlite unavailable)');
+  } else if (decodedState) {
+    countLine('state.vscdb decoded', decodedState.text, decodedState.binary);
+  }
   console.log('    ' + 'brain/<id> dir names'.padEnd(28) + `${brainDirMatches} match(es)`);
   if (agyhubFiles.length) {
     let structure = null;
@@ -1515,10 +1850,12 @@ function cmdDiagnose(dir, flags) {
   const fp = scanFilesFor(dbFiles, folderNeedles);
   const fpConvPb = scanFilesFor(convPbFiles, folderNeedles);
   const fpAgyhub = scanFilesFor(agyhubFiles, folderNeedles);
+  const fpStateDecoded = decodedState ? decodedState.folder : { filesWith: 0, occ: 0 };
   console.log(bold('\n  Folder-path linkage (alternative)'));
   console.log(`    conversations/*.db containing the project folder path: ${fp.filesWith} file(s)`);
   console.log(`    conversations/*.pb containing the project folder path: ${fpConvPb.filesWith} file(s)`);
   console.log(`    agyhub_summaries_proto.pb containing the project folder path: ${fpAgyhub.filesWith} file(s)`);
+  console.log(`    state.vscdb decoded protobuf containing the project folder path: ${fpStateDecoded.filesWith} file(s)`);
 
   // --- structured hints ---
   console.log(bold('\n  Structured link hints'));
@@ -1547,6 +1884,23 @@ function cmdDiagnose(dir, flags) {
   } else {
     console.log(dim('    agyhub protobuf: file not found'));
   }
+  if (decodedState === null && stateDbFiles.length) {
+    console.log(dim('    state.vscdb decoded protobuf: skipped (node:sqlite unavailable)'));
+  } else if (decodedState && decodedState.rows.length) {
+    for (const row of decodedState.rows.slice(0, 12)) {
+      const hits = [];
+      if (row.textHits) hits.push(`${row.textHits} text UUID`);
+      if (row.binaryHits) hits.push(`${row.binaryHits} binary UUID`);
+      if (row.folderHits) hits.push(`${row.folderHits} folder path`);
+      console.log(`    state decoded ${row.file} ItemTable[${row.key}]: ${hits.join(', ')} (${describeProtoStructure(row.structure)})`);
+      for (const [key, count] of row.projectPaths.slice(0, 4)) {
+        console.log(`      project UUID path ${key}: ${count} hit(s)`);
+      }
+    }
+    if (decodedState.rows.length > 12) console.log(dim(`    ... ${decodedState.rows.length - 12} more decoded state row(s)`));
+  } else {
+    console.log(dim('    state.vscdb decoded protobuf: no structured UUID/path hit'));
+  }
 
   // --- verdict ---
   console.log(bold('\n  Where the chat→project link most likely lives:'));
@@ -1561,15 +1915,25 @@ function cmdDiagnose(dir, flags) {
   note('brain', brainFiles);
   note('state.vscdb', stateFiles);
   note('workspaceStorage', wsFiles);
+  if (decodedState && (decodedState.text.occ || decodedState.binary.occ)) {
+    hits.push(`state.vscdb decoded (${decodedState.text.occ ? 'text' : ''}${decodedState.text.occ && decodedState.binary.occ ? '+' : ''}${decodedState.binary.occ ? 'binary' : ''})`);
+  }
   if (brainDirMatches) hits.push('brain dir names');
   if (hits.length) {
     console.log(green('    → ' + hits.join(', ')));
-  } else if (fp.filesWith || fpConvPb.filesWith || fpAgyhub.filesWith) {
+  } else if (fp.filesWith || fpConvPb.filesWith || fpAgyhub.filesWith || fpStateDecoded.filesWith) {
     console.log(yellow('    → not by project id; chats reference the FOLDER PATH instead.'));
   } else {
     console.log(red('    → no link found by id or folder path. Please mention your Antigravity version.'));
   }
-  console.log(dim('\n  Thanks! This tells us exactly how to make `merge` work on your setup.\n'));
+  const onlyAgyhubHit = hits.length === 1 && hits[0].startsWith('agyhub_summaries_proto.pb');
+  if (onlyAgyhubHit) {
+    console.log(yellow('\n  Caution: only agyhub summary refs were found.'));
+    console.log(dim('  That may update the visible list but may not repair the authoritative'));
+    console.log(dim('  conversation link when a chat is opened. Share this output before applying merge.\n'));
+  } else {
+    console.log(dim('\n  Thanks! This maps the stores `merge` can safely target on your setup.\n'));
+  }
 }
 
 // Interactive checkbox picker: choose exactly which entries to delete.
@@ -1765,7 +2129,7 @@ ${bold('OPTIONS')}
   --apply              Actually perform the change (consolidate/merge/purge are
                        dry-run without this)
   -y, --yes            Skip the confirmation prompt
-  --no-backup          Do not create a backup before deleting
+  --no-backup          Do not create a backup before changing files
   --force              Skip the "is Antigravity running?" safety check
   --dir <path>         Override the projects folder
                        ${dim('(default: ~/.gemini/config/projects)')}
@@ -1773,6 +2137,10 @@ ${bold('OPTIONS')}
                        ${dim('(default: ~/.gemini/antigravity/conversations)')}
   --agyhub-summaries <path>
                        Override agyhub_summaries_proto.pb for ${cyan('merge')} / ${cyan('diagnose')}
+  --user-data-dir <path>
+                       Override Antigravity User dir for decoded state.vscdb scans
+                       ${dim('(or set ANTIGRAVITY_USER_DATA_DIR)')}
+  --allow-agyhub-only  Allow legacy agyhub-summary-only merge behavior
   --no-color           Disable colored output
   -h, --help           Show this help
   -v, --version        Show version
