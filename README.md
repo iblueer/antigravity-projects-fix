@@ -463,7 +463,8 @@ re‑synced from the server. In that case you can:
   keep the backup, `restore` if needed.
 - An **agyhub-only** result is not enough evidence that chats are safely re-homed.
   In that case `merge --apply` will not delete duplicate project entries unless
-  you explicitly pass `--allow-agyhub-only`.
+  you explicitly pass `--allow-agyhub-only`; it prints a `[blocked]` message,
+  changes no files, and exits with code `2`.
 - **Tested on Windows only.** macOS (Apple Silicon & Intel) and Linux use the same
   code paths (`~/.gemini`, `pgrep`) and *should* work — but they are **unverified on
   real hardware.** On those systems, treat it as experimental: run `scan` first,

@@ -39,7 +39,7 @@ const path = require('path');
 const readline = require('readline');
 const { execSync, execFileSync } = require('child_process');
 
-const VERSION = '1.7.2';
+const VERSION = '1.7.3';
 
 // ---------------------------------------------------------------- ANSI color
 const useColor =
@@ -1288,6 +1288,7 @@ async function cmdMerge(dir, flags) {
   const statePlansOrNull = planStateVscdbUpdates(stateDbFiles, remap, userDir);
   const statePlans = statePlansOrNull || [];
   const stateRefs = statePlans.reduce((sum, p) => sum + p.refs, 0);
+  const onlyAgyhub = agyhubPlan && !plan.length && !convPbPlans.length && !statePlans.length;
   const targetParts = [];
   if (plan.length) targetParts.push(`${plan.length} chat DB(s)`);
   if (convPbPlans.length) targetParts.push(`${convPbRefs} conversation protobuf reference(s) in ${convPbPlans.length} file(s)`);
@@ -1296,13 +1297,23 @@ async function cmdMerge(dir, flags) {
   const targetSummary = targetParts.length ? targetParts.join(' and ') : '0 chat/project reference(s)';
 
   const apply = flags.apply;
-  console.log(
-    (apply ? bold('\n  Will re-point ') : bold('\n  [dry-run] would re-point ')) +
-      cyan(targetSummary) +
-      ` to their keeper project, then remove up to ` +
-      red(`${dupCount}`) +
-      ` duplicate entr${dupCount === 1 ? 'y' : 'ies'}.\n`
-  );
+  if (onlyAgyhub && !flags['allow-agyhub-only']) {
+    console.log(
+      (apply ? bold('\n  [blocked] would re-point ') : bold('\n  [dry-run] would re-point ')) +
+        cyan(targetSummary) +
+        ', but will not remove duplicate project entries without ' +
+        cyan('--allow-agyhub-only') +
+        '.\n'
+    );
+  } else {
+    console.log(
+      (apply ? bold('\n  Will re-point ') : bold('\n  [dry-run] would re-point ')) +
+        cyan(targetSummary) +
+        ` to their keeper project, then remove up to ` +
+        red(`${dupCount}`) +
+        ` duplicate entr${dupCount === 1 ? 'y' : 'ies'}.\n`
+    );
+  }
 
   if (agyhubPlan) {
     const structure = agyhubPlan.structure;
@@ -1338,7 +1349,6 @@ async function cmdMerge(dir, flags) {
     }
   }
 
-  const onlyAgyhub = agyhubPlan && !plan.length && !convPbPlans.length && !statePlans.length;
   if (onlyAgyhub) {
     console.log(yellow('\n  Only agyhub summary references were found.'));
     console.log(dim('  That file can affect the visible sidebar list, but recent macOS reports show'));
@@ -1346,8 +1356,13 @@ async function cmdMerge(dir, flags) {
     console.log(dim('  when a chat is opened. By default, apply will not delete duplicate project entries'));
     console.log(dim('  from an agyhub-only match.'));
     if (!flags['allow-agyhub-only']) {
-      console.log(dim('  Use --allow-agyhub-only only if you intentionally want the old summary-only behavior.\n'));
-      if (apply) return;
+      console.log(dim('  Use --allow-agyhub-only only if you intentionally want the old summary-only behavior.'));
+      if (apply) {
+        console.log(yellow('\n  No files were changed. This apply was blocked intentionally for safety.\n'));
+        process.exitCode = 2;
+        return;
+      }
+      console.log('');
     }
   }
 
