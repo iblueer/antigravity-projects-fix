@@ -11,3 +11,7 @@ Thumbs.db
 *.log
 .vscode/
 .idea/
+
+# Python cache files from helper scripts
+__pycache__/
+*.pyc
