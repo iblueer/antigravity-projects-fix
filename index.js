@@ -39,7 +39,7 @@ const path = require('path');
 const readline = require('readline');
 const { execSync, execFileSync } = require('child_process');
 
-const VERSION = '1.7.0';
+const VERSION = '1.7.1';
 
 // ---------------------------------------------------------------- ANSI color
 const useColor =
@@ -245,34 +245,38 @@ function prettyKey(key) {
   return key.replace(/file:\/\/\//gi, '').replace(/\s\+\s/g, '  +  ');
 }
 
-function isAntigravityRunning() {
+function listAntigravityProcesses() {
   try {
     if (process.platform === 'win32') {
       const out = execSync('tasklist /FI "IMAGENAME eq Antigravity.exe" /NH', {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
       });
-      return /Antigravity\.exe/i.test(out);
+      return out
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => /Antigravity\.exe/i.test(line));
     }
-    // Match by process NAME (not full command line) so this tool's own path —
-    // which contains "antigravity" — never counts as a false positive.
-    const sh = (cmd) => {
-      try {
-        return execSync(cmd, { encoding: 'utf8', shell: '/bin/sh', stdio: ['ignore', 'pipe', 'ignore'] });
-      } catch (_) {
-        return '';
-      }
-    };
-    const pg = sh('pgrep -i antigravity 2>/dev/null || true');
-    if (pg.trim()) return true;
-    // Fallback when pgrep is missing: match the command name column only.
-    const ps = sh('ps -A -o comm= 2>/dev/null | grep -i antigravity | grep -iv grep || true');
-    if (ps.trim()) return true;
-    // If neither tool produced usable output, we genuinely can't tell.
-    return pg === '' && ps === '' ? null : false;
+    // Match by process NAME/path column, not full command line, so this tool's
+    // own arguments or install path never count as a false positive.
+    const out = execSync('ps -A -o pid= -o comm= 2>/dev/null', {
+      encoding: 'utf8',
+      shell: '/bin/sh',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return out
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => /antigravity/i.test(line));
   } catch (_) {
-    return null; // could not determine
+    return null;
   }
+}
+
+function isAntigravityRunning() {
+  const processes = listAntigravityProcesses();
+  if (processes === null) return null;
+  return processes.length > 0;
 }
 
 function timestamp() {
@@ -306,7 +310,12 @@ function backupFiles(dir, fileNames, label) {
   const dest = `${dir.replace(/[/\\]+$/, '')}.${label}-backup-${timestamp()}`;
   try {
     fs.mkdirSync(dest, { recursive: true });
-    for (const f of fileNames) fs.copyFileSync(path.join(dir, f), path.join(dest, f));
+    for (const f of fileNames) {
+      const src = path.join(dir, f);
+      const dst = path.join(dest, f);
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      fs.copyFileSync(src, dst);
+    }
   } catch (e) {
     throw backupError(e);
   }
@@ -716,7 +725,7 @@ function resolveAgyhubSummariesFile(projectsDir, flags) {
   return path.join(geminiBaseDir(projectsDir), 'antigravity', 'agyhub_summaries_proto.pb');
 }
 
-function planAgyhubSummariesUpdate(filePath, remap) {
+function planProtoAsciiUuidUpdate(filePath, remap, displayFile) {
   if (!isFile(filePath)) return null;
   let buf;
   try { buf = fs.readFileSync(filePath); } catch (_) { return null; }
@@ -731,7 +740,7 @@ function planAgyhubSummariesUpdate(filePath, remap) {
   }
   if (!edits.length) return null;
   return {
-    file: path.basename(filePath),
+    file: displayFile || path.basename(filePath),
     full: filePath,
     size: buf.length,
     edits,
@@ -740,7 +749,7 @@ function planAgyhubSummariesUpdate(filePath, remap) {
   };
 }
 
-function applyAgyhubSummariesUpdate(plan) {
+function applyProtoAsciiUuidUpdate(plan) {
   const original = fs.readFileSync(plan.full);
   const before = protobufStructureFingerprint(original);
   if (!before) throw new Error('could not verify protobuf structure before editing');
@@ -768,6 +777,29 @@ function applyAgyhubSummariesUpdate(plan) {
     }
   }
   return { made, structure: before };
+}
+
+function planAgyhubSummariesUpdate(filePath, remap) {
+  return planProtoAsciiUuidUpdate(filePath, remap, path.basename(filePath));
+}
+
+function applyAgyhubSummariesUpdate(plan) {
+  return applyProtoAsciiUuidUpdate(plan);
+}
+
+function planConversationPbUpdates(convDir, remap) {
+  const plans = [];
+  const files = walkFiles(convDir, ['.pb'], 5000);
+  for (const full of files) {
+    const rel = path.relative(convDir, full);
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) continue;
+    const plan = planProtoAsciiUuidUpdate(full, remap, rel.replace(/\\/g, '/'));
+    if (plan) {
+      plan.relative = rel;
+      plans.push(plan);
+    }
+  }
+  return plans;
 }
 
 /** Electron user-data dir for Antigravity (holds globalStorage/workspaceStorage). */
@@ -850,13 +882,17 @@ async function confirm(flags, message) {
 
 async function guardRunning(flags) {
   if (flags.force) return;
-  const running = isAntigravityRunning();
-  if (running === true) {
+  const processes = listAntigravityProcesses();
+  if (processes && processes.length) {
     console.log(
       red('\n  Antigravity appears to be RUNNING.') +
         '\n  Close it completely first, or the files may be locked or rewritten.' +
         dim('\n  (use --force to override)\n')
     );
+    console.log(dim('  Matched process(es):'));
+    for (const line of processes.slice(0, 8)) console.log(dim(`    ${line}`));
+    if (processes.length > 8) console.log(dim(`    ... ${processes.length - 8} more`));
+    console.log('');
     process.exit(2);
   }
 }
@@ -1016,10 +1052,13 @@ async function cmdMerge(dir, flags) {
     if (edits.length) plan.push({ db, dbPath, walPath, walSize, edits });
   }
 
+  const convPbPlans = fs.existsSync(convDir) ? planConversationPbUpdates(convDir, remap) : [];
+  const convPbRefs = convPbPlans.reduce((sum, p) => sum + p.refs, 0);
   const agyhubFile = resolveAgyhubSummariesFile(dir, flags);
   const agyhubPlan = planAgyhubSummariesUpdate(agyhubFile, remap);
   const targetParts = [];
   if (plan.length) targetParts.push(`${plan.length} chat DB(s)`);
+  if (convPbPlans.length) targetParts.push(`${convPbRefs} conversation protobuf reference(s) in ${convPbPlans.length} file(s)`);
   if (agyhubPlan) targetParts.push(`${agyhubPlan.refs} agyhub summary reference(s)`);
   const targetSummary = targetParts.length ? targetParts.join(' and ') : '0 chat/project reference(s)';
 
@@ -1040,9 +1079,16 @@ async function cmdMerge(dir, flags) {
       console.log(yellow('  Apply will refuse to edit that protobuf file unless its wire structure can be verified.'));
     }
   }
+  if (convPbPlans.length) {
+    const unverified = convPbPlans.filter((p) => !p.structure).length;
+    console.log(dim(`  Found ${convPbRefs} duplicate project UUID reference(s) in ${convPbPlans.length} conversation protobuf file(s).`));
+    if (unverified) {
+      console.log(yellow(`  Apply will refuse to edit ${unverified} conversation protobuf file(s) unless their wire structure can be verified.`));
+    }
+  }
 
   // A2 — fail-safe when nothing is detected. Do NOT imply consolidate is safe.
-  if (!plan.length && !agyhubPlan) {
+  if (!plan.length && !convPbPlans.length && !agyhubPlan) {
     console.log(yellow('  Detected 0 chats/project references linked to the duplicates by known methods.'));
     console.log(dim('  That can mean there genuinely are none — OR that your machine stores the'));
     console.log(dim('  chat→project link differently (e.g. 16-byte binary, or another file).'));
@@ -1092,14 +1138,15 @@ async function cmdMerge(dir, flags) {
   if (!flags['no-backup']) {
     const pdest = backup(dir);
     console.log(dim(`  Backup (projects): ${pdest}`));
-    if (plan.length) {
-      const chatFiles = [];
+    if (plan.length || convPbPlans.length) {
+      const chatFiles = new Set();
       for (const p of plan) {
         for (const ext of ['', '-wal', '-shm']) {
-          if (fs.existsSync(p.dbPath + ext)) chatFiles.push(p.db + ext);
+          if (fs.existsSync(p.dbPath + ext)) chatFiles.add(p.db + ext);
         }
       }
-      chatBackupDir = backupFiles(convDir, chatFiles, 'merge');
+      for (const p of convPbPlans) chatFiles.add(p.relative);
+      chatBackupDir = backupFiles(convDir, [...chatFiles], 'merge');
       console.log(dim(`  Backup (chats):    ${chatBackupDir}`));
     }
     if (agyhubPlan) {
@@ -1144,6 +1191,32 @@ async function cmdMerge(dir, flags) {
   }
   if (plan.length) console.log(green(`  Re-pointed ${edited} chat DB(s).`));
 
+  let convPbEdited = 0;
+  let convPbRefsEdited = 0;
+  const convPbFailed = [];
+  for (const p of convPbPlans) {
+    try {
+      const result = applyProtoAsciiUuidUpdate(p);
+      convPbEdited++;
+      convPbRefsEdited += result.made;
+    } catch (err) {
+      convPbFailed.push({ file: p.file, reason: err.message, edits: p.edits, plan: p });
+      if (chatBackupDir) {
+        const backupFile = path.join(chatBackupDir, p.relative);
+        if (fs.existsSync(backupFile)) {
+          try { fs.copyFileSync(backupFile, p.full); } catch (_) { /* best effort */ }
+        }
+      }
+    }
+  }
+  if (convPbFailed.length) {
+    console.log(yellow(`\n  ${convPbFailed.length} conversation protobuf file(s) could not be re-pointed (restored from backup):`));
+    for (const f of convPbFailed) console.log(dim(`    ${f.file} — ${f.reason}`));
+  }
+  if (convPbPlans.length) {
+    console.log(green(`  Updated ${convPbRefsEdited} conversation protobuf reference(s) in ${convPbEdited} file(s).`));
+  }
+
   let agyhubFailed = null;
   if (agyhubPlan) {
     try {
@@ -1169,6 +1242,7 @@ async function cmdMerge(dir, flags) {
   // otherwise removing it would orphan those chats.
   const unsafeDups = new Set();
   for (const f of failed) for (const e of f.edits) unsafeDups.add(e.from);
+  for (const f of convPbFailed) for (const e of f.edits) unsafeDups.add(e.from);
   if (agyhubFailed) for (const e of agyhubPlan.edits) unsafeDups.add(e.from);
   const toDelete = [];
   for (const list of groups.values()) {
@@ -1258,29 +1332,31 @@ function cmdRestore(backupDir, dir, flags) {
     process.exit(1);
   }
   // Route each backed-up file to the right place by type: project registry
-  // files (.json) go to the projects folder; chat databases (.db / .db-wal /
-  // .db-shm) go to the conversations folder, and the agyhub summaries protobuf
-  // goes to the Antigravity data folder. This handles project, chat, and agyhub
-  // backup folders created by merge/consolidate/purge.
+  // files (.json) go to the projects folder; chat files (.db / .db-wal /
+  // .db-shm / .pb) go to the conversations folder, and the agyhub summaries
+  // protobuf goes to the Antigravity data folder. Conversation backups may
+  // contain nested paths, so walk recursively and preserve their relative path.
   const convDir = resolveConversationsDir(dir, flags);
   const agyhubFile = resolveAgyhubSummariesFile(dir, flags);
   const agyhubDir = path.dirname(agyhubFile);
   const agyhubName = path.basename(agyhubFile).toLowerCase();
-  const files = fs.readdirSync(backupDir);
+  const files = walkFiles(backupDir, null, Number.MAX_SAFE_INTEGER);
   let proj = 0;
   let chat = 0;
   let agyhub = 0;
-  for (const f of files) {
-    const src = path.join(backupDir, f);
-    if (!fs.statSync(src).isFile()) continue;
-    const lower = f.toLowerCase();
+  for (const src of files) {
+    const rel = path.relative(backupDir, src);
+    const name = path.basename(src);
+    const lower = name.toLowerCase();
     let target = null;
+    let outRel = name;
     if (lower.endsWith('.json')) target = dir;
-    else if (/\.(db|db-wal|db-shm)$/.test(lower)) target = convDir;
     else if (lower === agyhubName || lower === 'agyhub_summaries_proto.pb') target = agyhubDir;
+    else if (/\.(db|db-wal|db-shm|pb)$/.test(lower)) { target = convDir; outRel = rel; }
     if (!target) continue;
-    fs.mkdirSync(target, { recursive: true });
-    fs.copyFileSync(src, path.join(target, f));
+    const dest = path.join(target, outRel);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.copyFileSync(src, dest);
     if (target === dir) proj++;
     else if (target === agyhubDir) agyhub++;
     else chat++;

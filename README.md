@@ -267,9 +267,9 @@ How it works, and why it's safe:
 - Antigravity **2.0.1** can also keep conversation summaries as
   `~/.gemini/antigravity/conversations/*.pb` and/or mirror the chat→project pointer
   in `~/.gemini/antigravity/agyhub_summaries_proto.pb`.
-- `merge` scans the SQLite chat DBs and the agyhub summaries file, rewrites whichever
-  duplicate project UUID references it finds, and verifies the agyhub protobuf wire
-  structure before and after the write.
+- `merge` scans the SQLite chat DBs, per-conversation protobuf files, and the
+  agyhub summaries file, rewrites whichever duplicate project UUID references it
+  finds, and verifies protobuf wire structure before and after each protobuf write.
 - After each SQLite database write it runs SQLite's `integrity_check`; if a chat
   doesn't come back clean it's **restored from backup automatically** and its
   project is kept.
@@ -437,8 +437,8 @@ re‑synced from the server. In that case you can:
   if you want those chats re‑homed under the surviving project instead. With
   `consolidate`/`purge`, **your conversation data itself** (in
   `~/.gemini/antigravity/conversations`) **is never touched.**
-- `merge` is **experimental** — it edits chat databases and, on setups that use it,
-  `agyhub_summaries_proto.pb` via length‑preserving UUID rewrites
+- `merge` is **experimental** — it edits chat databases and, on setups that use them,
+  `conversations/*.pb` plus `agyhub_summaries_proto.pb` via length‑preserving UUID rewrites
   (reverse‑engineered, validated on synthetic data and Windows plus macOS user
   diagnostics). It never deletes a chat and backs every file up first, but treat
   it with the same care: dry‑run, keep the backup, `restore` if needed.
@@ -466,8 +466,9 @@ It never touches your source code, and it never deletes conversation content.
 `consolidate` and `purge` edit only the project **registry** files
 (`~/.gemini/config/projects`). [`merge`](#merge--keep-your-chats-grouped-under-one-project)
 also rewrites the stored project pointer in chat DBs and, on some setups,
-`agyhub_summaries_proto.pb` — but it never deletes a chat and backs each touched
-file up first. Every destructive action is dry‑run by default. See [Safety](#-safety).
+`conversations/*.pb` / `agyhub_summaries_proto.pb` — but it never deletes a chat
+and backs each touched file up first. Every destructive action is dry‑run by
+default. See [Safety](#-safety).
 
 **My duplicate projects each have their own chats — can I keep the chats and group them under one project?**
 Yes — that's exactly what [`merge`](#merge--keep-your-chats-grouped-under-one-project) does.
