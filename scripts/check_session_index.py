@@ -472,6 +472,41 @@ def decode_state_value(value: str | bytes) -> bytes:
         return raw
 
 
+def extract_state_summary_payloads(user_dir: Path) -> dict[str, bytes]:
+    db_path = user_dir / "globalStorage" / "state.vscdb"
+    if not db_path.exists():
+        return {}
+    out: dict[str, bytes] = {}
+    key = "antigravityUnifiedStateSync.trajectorySummaries"
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            row = con.execute("select value from ItemTable where key=?", (key,)).fetchone()
+            if not row:
+                return out
+            decoded = decode_state_value(row[0])
+        finally:
+            con.close()
+    except Exception as exc:
+        print(f"WARN: cannot read state summaries from {db_path}: {exc}", file=sys.stderr)
+        return out
+
+    for match in UUID_RE.finditer(decoded):
+        cid = match.group().decode("ascii")
+        tail = decoded[match.end() : match.end() + 5000]
+        b64 = re.match(rb"[^A-Za-z0-9+/=]*([A-Za-z0-9+/=]{80,})", tail)
+        if not b64:
+            continue
+        try:
+            payload = base64.b64decode(b64.group(1), validate=True)
+            fields = parse_fields(payload)
+        except Exception:
+            continue
+        if first_string_msg(payload, 1) and any(field == 17 and wire == 2 for field, wire, _, _ in fields):
+            out[cid] = payload
+    return out
+
+
 def read_state_ids(user_dir: Path) -> dict[str, set[str]]:
     out: dict[str, set[str]] = {}
     db_path = user_dir / "globalStorage" / "state.vscdb"
@@ -571,6 +606,12 @@ def build_summary_entry(conv: Conversation, project: Project | None) -> bytes:
     return enc_bytes(1, entry)
 
 
+def build_summary_entry_from_payload(cid: str, payload: bytes) -> bytes:
+    entry = enc_string(1, cid)
+    entry += enc_bytes(2, payload)
+    return enc_bytes(1, entry)
+
+
 def backup_file(path: Path) -> Path:
     stamp = time.strftime("%Y%m%d-%H%M%S")
     backup = path.with_name(f"{path.name}.backup-{stamp}")
@@ -583,14 +624,21 @@ def repair_missing_summaries(
     summaries: list[Summary],
     missing: list[Conversation],
     projects: dict[str, Project],
+    state_payloads: dict[str, bytes],
     apply: bool,
 ) -> int:
-    candidates = [c for c in missing if c.kind == "db"]
+    candidates = [c for c in missing if c.kind == "db" or c.cid in state_payloads]
     print(f"Repair candidates: {len(candidates)}")
     for conv in sorted(candidates, key=lambda c: c.mtime, reverse=True):
-        project = best_project_for_conversation(projects, conv)
-        pname = project.name if project else "outside-of-project"
-        print(f"  + {conv.cid} | {conv.title or conv.cid} | {pname}")
+        if conv.cid in state_payloads:
+            payload_summary = parse_summaries_from_bytes(build_summary_entry_from_payload(conv.cid, state_payloads[conv.cid]))[0]
+            project = payload_summary.project
+            pname = projects.get(project).name if project in projects else project or "outside-of-project"
+            print(f"  + {conv.cid} | {payload_summary.title} | {pname} | state-payload")
+        else:
+            project_obj = best_project_for_conversation(projects, conv)
+            pname = project_obj.name if project_obj else "outside-of-project"
+            print(f"  + {conv.cid} | {conv.title or conv.cid} | {pname} | db-synthesized")
     if not candidates:
         return 0
     if not apply:
@@ -600,7 +648,13 @@ def repair_missing_summaries(
     original = summary_path.read_bytes() if summary_path.exists() else b""
     if original:
         parse_fields(original)
-    additions = b"".join(build_summary_entry(c, best_project_for_conversation(projects, c)) for c in candidates)
+    entries: list[bytes] = []
+    for conv in candidates:
+        if conv.cid in state_payloads:
+            entries.append(build_summary_entry_from_payload(conv.cid, state_payloads[conv.cid]))
+        else:
+            entries.append(build_summary_entry(conv, best_project_for_conversation(projects, conv)))
+    additions = b"".join(entries)
     updated = original + additions
     parsed = parse_summaries_from_bytes(updated)
     old_ids = {s.cid for s in summaries}
@@ -666,6 +720,7 @@ def run(args: argparse.Namespace) -> int:
     summaries = parse_summaries(summary_path) if summary_path.exists() else []
     conversations = list_conversations(conv_dir) if conv_dir.exists() else {}
     state_ids = read_state_ids(user_dir)
+    state_payloads = extract_state_summary_payloads(user_dir)
 
     summary_ids = {s.cid for s in summaries}
     current_project_ids = set(projects)
@@ -728,14 +783,14 @@ def run(args: argparse.Namespace) -> int:
             print("No changes made.")
             print("Use --repair-missing-summary --apply to append missing agyhub summary records.")
             return 2
-        repaired = repair_missing_summaries(summary_path, summaries, missing_from_summary, projects, apply=True)
+        repaired = repair_missing_summaries(summary_path, summaries, missing_from_summary, projects, state_payloads, apply=True)
         refreshed = parse_summaries(summary_path)
         refreshed_ids = {s.cid for s in refreshed}
         still_missing = [c for c in conversations.values() if c.cid not in refreshed_ids]
         print(f"Conversations missing from summary after repair: {len(still_missing)}")
         return 0 if repaired else 1
     if args.repair_missing_summary:
-        repair_missing_summaries(summary_path, summaries, missing_from_summary, projects, apply=False)
+        repair_missing_summaries(summary_path, summaries, missing_from_summary, projects, state_payloads, apply=False)
     return 0
 
 

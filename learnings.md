@@ -59,6 +59,48 @@ the global summary index, but the script should not synthesize summaries from
 them until their internal fields are mapped. They do not expose the SQLite
 metadata used for the DB repair path.
 
+Follow-up investigation on two missing `.pb` conversations found:
+
+- `0e95d5ec-57a7-47ef-8c6b-e3a1d873c88d.pb`: about 211 KiB
+- `04090889-6731-4a49-a1fe-cb0139e5b3a8.pb`: about 752 KiB
+
+Both files are high-entropy raw data. They do not parse as a single protobuf
+message, a length-delimited protobuf stream, or common compression formats such
+as gzip, zlib, bz2, or lzma. They also do not contain plain UUIDs, workspace
+URIs, or readable conversation text. `file(1)` reports them only as `data`.
+
+That means the `.pb` file body is not currently a safe source for summary field
+extraction. However, the IDE global state row
+`antigravityUnifiedStateSync.trajectorySummaries` contains both missing
+conversation ids followed by base64-encoded summary payloads. Those decoded
+payloads match the same summary payload shape used by `agyhub_summaries_proto.pb`
+entry field `2`.
+
+The two decoded state summary payloads contained:
+
+- `04090889-6731-4a49-a1fe-cb0139e5b3a8`
+  - title: `VS Code Marketplace Custom Installer`
+  - trajectory id: `3d6191a0-f786-4a21-a157-f2739be81999`
+  - workspace: `file:///Users/maemolee/GitHub/enhanced-vscode-marketplace`
+  - project field: absent in the state payload
+- `0e95d5ec-57a7-47ef-8c6b-e3a1d873c88d`
+  - title: `你知道这个项目应该怎么跑起来吗？`
+  - trajectory id: `194e31bc-9068-4a61-9ef9-96fe49d2fecf`
+  - workspace: `file:///Users/maemolee/GitHub/code-switch-R`
+  - project field: absent in the state payload
+
+For `.pb` conversations, the safer repair path is therefore:
+
+- find the missing conversation id in `antigravityUnifiedStateSync.trajectorySummaries`
+- decode the following base64 summary payload
+- validate that it parses and has a title plus link block
+- create an agyhub summary entry using the `.pb` filename stem as entry field `1`
+  and the decoded state payload as entry field `2`
+
+This avoids guessing from the opaque `.pb` body. If a `.pb` conversation has no
+matching state summary payload, the script should continue reporting it instead
+of fabricating a summary from incomplete evidence.
+
 Safety notes:
 
 - Read-only reporting should remain the default.
