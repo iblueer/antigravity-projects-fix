@@ -14,22 +14,15 @@ struct AgySessionTrayApp: App {
 
     var body: some Scene {
         WindowGroup("Antigravity Sessions") {
-            StatusView()
+            DashboardView()
                 .environmentObject(viewModel)
-                .frame(minWidth: 420, idealWidth: 460, minHeight: 620)
-                .task {
-                    await viewModel.refresh()
-                }
+                .frame(minWidth: 740, idealWidth: 780, minHeight: 560, idealHeight: 620)
         }
         .windowResizability(.contentMinSize)
 
         MenuBarExtra {
-            StatusView()
+            MenuStatusView()
                 .environmentObject(viewModel)
-                .frame(width: 380)
-                .task {
-                    await viewModel.refresh()
-                }
         } label: {
             Image(systemName: viewModel.statusIcon)
         }
