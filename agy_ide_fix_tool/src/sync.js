@@ -6,6 +6,7 @@ const { areaConfig } = require('./areas');
 const { encodeBytes, encodeString, parseSummaryEntries } = require('./protobuf');
 const { assertNotRunning } = require('./processes');
 const { mirrorStateFromAgyhub } = require('./state');
+const { analyzeSharedConflicts, applyConflictDecisions, syncLogPath, writeSyncLog } = require('./conflicts');
 
 function listConversations(dir) {
   const out = new Map();
@@ -71,6 +72,29 @@ function sameFileShape(a, b) {
   return a && b && a.size === b.size;
 }
 
+function summarizeConflicts(conflicts, limit = 10) {
+  return {
+    counts: conflicts.counts,
+    samples: conflicts.items.slice(0, limit).map((item) => ({
+      cid: item.cid,
+      action: item.decision.action,
+      reason: item.decision.reason,
+      ag: {
+        file: item.ag.file,
+        size: item.ag.size,
+        stepCount: item.ag.stepCount,
+        updatedAtMs: item.ag.updatedAtMs,
+      },
+      ide: {
+        file: item.ide.file,
+        size: item.ide.size,
+        stepCount: item.ide.stepCount,
+        updatedAtMs: item.ide.updatedAtMs,
+      },
+    })),
+  };
+}
+
 function buildSyncPlan(flags = {}) {
   const ag = areaConfig('ag', flags);
   const ide = areaConfig('ide', flags);
@@ -80,6 +104,7 @@ function buildSyncPlan(flags = {}) {
   const ideSummaries = readSummaries(ide.agyhubSummaryPath);
   const sharedConversationIds = Array.from(agConvs.keys()).filter((id) => ideConvs.has(id));
   const fileShapeConflicts = sharedConversationIds.filter((id) => !sameFileShape(agConvs.get(id), ideConvs.get(id)));
+  const conflicts = analyzeSharedConflicts(ag, ide, agConvs, ideConvs, agSummaries, ideSummaries);
 
   return {
     generatedAt: new Date().toISOString(),
@@ -107,6 +132,11 @@ function buildSyncPlan(flags = {}) {
       agSummaryMissingInIde: diffIds(agSummaries, ideSummaries).length,
       ideSummaryMissingInAg: diffIds(ideSummaries, agSummaries).length,
       fileShapeConflicts: fileShapeConflicts.length,
+      contentConflicts: conflicts.counts.total,
+      autoReplaceAgFromIde: conflicts.counts.autoReplaceAgFromIde,
+      autoReplaceIdeFromAg: conflicts.counts.autoReplaceIdeFromAg,
+      keepBothConflicts: conflicts.counts.keepBoth,
+      skippedSameSummaryConflicts: conflicts.counts.skippedSameSummary,
     },
     samples: {
       agConversationMissingInIde: diffIds(agConvs, ideConvs).slice(0, 10),
@@ -114,6 +144,7 @@ function buildSyncPlan(flags = {}) {
       agSummaryMissingInIde: diffIds(agSummaries, ideSummaries).slice(0, 10),
       ideSummaryMissingInAg: diffIds(ideSummaries, agSummaries).slice(0, 10),
       fileShapeConflicts: fileShapeConflicts.slice(0, 10),
+      contentConflicts: summarizeConflicts(conflicts).samples,
     },
   };
 }
@@ -129,6 +160,10 @@ function printSyncPlan(plan) {
   console.log(`  summaries only in Antigravity: ${plan.counts.agSummaryMissingInIde}`);
   console.log(`  summaries only in Antigravity IDE: ${plan.counts.ideSummaryMissingInAg}`);
   console.log(`  same-id file size conflicts: ${plan.counts.fileShapeConflicts}`);
+  console.log(`  same-id content conflicts: ${plan.counts.contentConflicts}`);
+  console.log(`  auto replace Antigravity from IDE: ${plan.counts.autoReplaceAgFromIde}`);
+  console.log(`  auto replace IDE from Antigravity: ${plan.counts.autoReplaceIdeFromAg}`);
+  console.log(`  keep both conflicts: ${plan.counts.keepBothConflicts}`);
   for (const [name, values] of Object.entries(plan.samples)) {
     if (values.length) console.log(`  sample ${name}: ${values.join(', ')}`);
   }
@@ -200,6 +235,9 @@ function printOneWaySyncPlan(plan, apply) {
 
 function applyOneWaySync(plan, flags) {
   assertNotRunning({ force: Boolean(flags.force) });
+  if (!plan.copyableIds.length && !plan.summaryIds.length) {
+    return { backups: { conversations: null, agyhub: null, state: null }, copied: 0, summaries: 0, stateBackup: null, skipped: true };
+  }
   fs.mkdirSync(plan.target.conversationDir, { recursive: true });
   const backups = {
     conversations: fs.existsSync(plan.target.conversationDir) ? copyDirBackup(plan.target.conversationDir, 'sync') : null,
@@ -238,22 +276,95 @@ function applyOneWaySync(plan, flags) {
   }
 }
 
+function buildConflictPlan(flags = {}) {
+  const ag = areaConfig('ag', flags);
+  const ide = areaConfig('ide', flags);
+  const agConvs = listConversations(ag.conversationDir);
+  const ideConvs = listConversations(ide.conversationDir);
+  const agSummaries = readSummaries(ag.agyhubSummaryPath);
+  const ideSummaries = readSummaries(ide.agyhubSummaryPath);
+  const conflicts = analyzeSharedConflicts(ag, ide, agConvs, ideConvs, agSummaries, ideSummaries);
+  return {
+    generatedAt: new Date().toISOString(),
+    logPath: syncLogPath(),
+    ...summarizeConflicts(conflicts, Number(flags.limit || 20)),
+  };
+}
+
+function applySharedConflictResolution(flags = {}) {
+  const ag = areaConfig('ag', flags);
+  const ide = areaConfig('ide', flags);
+  const agConvs = listConversations(ag.conversationDir);
+  const ideConvs = listConversations(ide.conversationDir);
+  const agSummaries = readSummaries(ag.agyhubSummaryPath);
+  const ideSummaries = readSummaries(ide.agyhubSummaryPath);
+  const conflicts = analyzeSharedConflicts(ag, ide, agConvs, ideConvs, agSummaries, ideSummaries);
+  const operations = applyConflictDecisions(conflicts, agSummaries, ideSummaries);
+  const changedAgSummary = operations.some((item) => item.action === 'replace-ag-from-ide');
+  const changedIdeSummary = operations.some((item) => item.action === 'replace-ide-from-ag');
+  const summaryBackups = { ag: null, ide: null };
+  const stateBackups = { ag: null, ide: null };
+  if (changedAgSummary) {
+    summaryBackups.ag = copyFileBackup(ag.agyhubSummaryPath, 'conflict-resolve');
+    writeAgyhubSummaries(ag.agyhubSummaryPath, Array.from(agSummaries.values()));
+    stateBackups.ag = mirrorStateFromAgyhub(ag, Array.from(agSummaries.values()), { apply: true }).backup;
+  }
+  if (changedIdeSummary) {
+    summaryBackups.ide = copyFileBackup(ide.agyhubSummaryPath, 'conflict-resolve');
+    writeAgyhubSummaries(ide.agyhubSummaryPath, Array.from(ideSummaries.values()));
+    stateBackups.ide = mirrorStateFromAgyhub(ide, Array.from(ideSummaries.values()), { apply: true }).backup;
+  }
+  writeSyncLog({
+    kind: 'bidirectional-conflict-resolution',
+    counts: conflicts.counts,
+    operations: operations.length,
+    summaryBackups,
+    stateBackups,
+  });
+  return {
+    generatedAt: new Date().toISOString(),
+    logPath: syncLogPath(),
+    counts: conflicts.counts,
+    operations,
+    summaryBackups,
+    stateBackups,
+  };
+}
+
 function applyBidirectionalSync(flags = {}) {
   const firstPlan = buildOneWaySyncPlan({ ...flags, from: 'ag', to: 'ide' });
   const first = applyOneWaySync(firstPlan, flags);
   const secondPlan = buildOneWaySyncPlan({ ...flags, from: 'ide', to: 'ag' });
   const second = applyOneWaySync(secondPlan, flags);
+  const conflicts = applySharedConflictResolution(flags);
   return {
     generatedAt: new Date().toISOString(),
+    logPath: syncLogPath(),
     directions: [
       { plan: oneWayPlanSummary(firstPlan), result: first },
       { plan: oneWayPlanSummary(secondPlan), result: second },
     ],
+    conflicts,
   };
 }
 
 function runSync(args = [], flags = {}) {
   const sub = args[0] || 'plan';
+  if (sub === 'conflicts') {
+    const result = buildConflictPlan(flags);
+    if (flags.json) console.log(JSON.stringify(result, null, 2));
+    else {
+      console.log('Antigravity same-id conflict inspection');
+      console.log(`  content conflicts: ${result.counts.total}`);
+      console.log(`  auto replace Antigravity from IDE: ${result.counts.autoReplaceAgFromIde}`);
+      console.log(`  auto replace IDE from Antigravity: ${result.counts.autoReplaceIdeFromAg}`);
+      console.log(`  keep both: ${result.counts.keepBoth}`);
+      console.log(`  skipped same summary: ${result.counts.skippedSameSummary}`);
+      console.log(`  log path: ${result.logPath}`);
+      for (const sample of result.samples) console.log(`  sample ${sample.cid}: ${sample.action} (${sample.reason})`);
+    }
+    return 0;
+  }
   if (sub === 'plan' && flags.json && (flags.from || flags.to)) {
     console.log(JSON.stringify(oneWayPlanSummary(buildOneWaySyncPlan(flags)), null, 2));
     return 0;
@@ -280,6 +391,7 @@ function runSync(args = [], flags = {}) {
           oneWayPlanSummary(buildOneWaySyncPlan({ ...flags, from: 'ag', to: 'ide' })),
           oneWayPlanSummary(buildOneWaySyncPlan({ ...flags, from: 'ide', to: 'ag' })),
         ],
+        conflicts: buildConflictPlan(flags),
       };
       if (!flags.apply) {
         if (flags.json) console.log(JSON.stringify({ applied: false, ...preview }, null, 2));

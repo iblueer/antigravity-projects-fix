@@ -59,12 +59,16 @@ final class StatusViewModel: ObservableObject {
                 throw NSError(domain: "AgySessionTray", code: 1, userInfo: [NSLocalizedDescriptionKey: "Antigravity 或 Antigravity IDE 未能在 20 秒内退出，同步已取消。"])
             }
 
-            _ = try await runner.bidirectionalSync()
+            let result = try await runner.bidirectionalSync()
             doctor = try await runner.doctor()
             syncPlan = try await runner.syncPlan()
             persisted.lastSyncAt = Date()
             persisted.lastSyncStatus = "success"
-            persisted.lastSyncMessage = "同步完成"
+            if let conflicts = result.conflicts {
+                persisted.lastSyncMessage = "同步完成；覆盖 \(conflicts.counts.autoReplaceAgFromIde + conflicts.counts.autoReplaceIdeFromAg)，保留两份 \(conflicts.counts.keepBoth)"
+            } else {
+                persisted.lastSyncMessage = "同步完成"
+            }
             store.save(persisted)
             errorMessage = nil
         } catch {
@@ -217,6 +221,10 @@ struct SyncPlanView: View {
                 metric("AG 独有 summary", plan.counts.agSummaryMissingInIde)
                 metric("IDE 独有 summary", plan.counts.ideSummaryMissingInAg)
                 metric("同 ID 文件差异", plan.counts.fileShapeConflicts)
+                metric("同 ID 内容差异", plan.counts.contentConflicts ?? 0)
+                metric("用 IDE 覆盖 AG", plan.counts.autoReplaceAgFromIde ?? 0)
+                metric("用 AG 覆盖 IDE", plan.counts.autoReplaceIdeFromAg ?? 0)
+                metric("保留两份", plan.counts.keepBothConflicts ?? 0)
             }
         }
         .padding(10)

@@ -34,6 +34,7 @@ Usage:
   agyfix-session repair state --area ide --mirror-agyhub [--apply]
   agyfix-session sync plan
   agyfix-session sync plan --json
+  agyfix-session sync conflicts [--json]
   agyfix-session sync plan --from ide --to ag
   agyfix-session sync apply --from ide --to ag [--apply]
   agyfix-session sync apply --bidirectional [--apply] [--json]

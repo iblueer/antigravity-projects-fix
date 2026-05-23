@@ -47,12 +47,18 @@ struct SyncCounts: Decodable {
     let agSummaryMissingInIde: Int
     let ideSummaryMissingInAg: Int
     let fileShapeConflicts: Int
+    let contentConflicts: Int?
+    let autoReplaceAgFromIde: Int?
+    let autoReplaceIdeFromAg: Int?
+    let keepBothConflicts: Int?
+    let skippedSameSummaryConflicts: Int?
 }
 
 struct SyncResult: Decodable {
     let applied: Bool
     let generatedAt: String
     let directions: [SyncDirectionResult]
+    let conflicts: SyncConflictApplyResult?
 }
 
 struct SyncDirectionResult: Decodable {
@@ -68,6 +74,25 @@ struct OneWayPlan: Decodable {
 struct OneWayResult: Decodable {
     let copied: Int
     let summaries: Int
+}
+
+struct SyncConflictApplyResult: Decodable {
+    let logPath: String?
+    let counts: SyncConflictCounts
+    let operations: [SyncConflictOperation]
+}
+
+struct SyncConflictCounts: Decodable {
+    let total: Int
+    let autoReplaceAgFromIde: Int
+    let autoReplaceIdeFromAg: Int
+    let keepBoth: Int
+    let skippedSameSummary: Int
+}
+
+struct SyncConflictOperation: Decodable {
+    let cid: String
+    let action: String
 }
 
 struct PersistedState: Codable {

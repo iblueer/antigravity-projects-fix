@@ -21,6 +21,8 @@ node agy_ide_fix_tool/src/cli.js doctor --all
 node agy_ide_fix_tool/src/cli.js doctor --all --json
 node agy_ide_fix_tool/src/cli.js sync plan
 node agy_ide_fix_tool/src/cli.js sync plan --json
+node agy_ide_fix_tool/src/cli.js sync conflicts
+node agy_ide_fix_tool/src/cli.js sync conflicts --json
 node agy_ide_fix_tool/src/cli.js sync plan --from ide --to ag
 node agy_ide_fix_tool/src/cli.js sync apply --from ide --to ag
 node agy_ide_fix_tool/src/cli.js sync apply --bidirectional
@@ -41,6 +43,7 @@ node agy_ide_fix_tool/src/cli.js sync apply --bidirectional --apply
 ## 当前限制
 
 - `sync apply` 支持单向复制缺失会话，也支持 `--bidirectional` 顺序执行双向同步。默认只预览。
+- `sync conflicts` 会探测同 ID 会话内容差异；自动处理只在能证明一边更完整时发生。
 - `repair state` 目前只修 state summary，不改 conversation 文件和项目配置。
 - 同 id 的 conversation 文件在 `Antigravity` 与 `Antigravity IDE` 中大小不同，后续同步实现不能直接覆盖。
 - 写入前应关闭 Antigravity / Antigravity IDE。写入命令已接入主进程保护，可用 `--force` 绕过。
@@ -60,12 +63,17 @@ AGY_FIX_TOOL_ROOT=/Users/maemolee/GitHub/antigravity-projects-fix/agy_ide_fix_to
 
 - 显示 Antigravity 和 Antigravity IDE 当前 Session、agyhub、state 数量。
 - 显示健康状态和双向同步差异。
+- 显示同 ID 会话文件差异和可自动处理数量。
 - 手动点击双向同步。
 - 同步前会请求确认，然后退出 Antigravity 和 Antigravity IDE，确认退出后才写入。
 - 记录最后同步时间到 `~/Library/Application Support/AgySessionTray/state.json`。
+- 同步日志写到 `~/Library/Application Support/AgySessionTray/sync.log`。
+- 覆盖备份写到 `~/Library/Application Support/AgySessionTray/backups/`。
+- 无法证明谁更完整的同 ID 差异会复制到 `~/Library/Application Support/AgySessionTray/conflicts/`，不会覆盖原文件。
 
 菜单栏工具调用 Node CLI：
 
 - `doctor --all --json`
 - `sync plan --json`
+- `sync conflicts --json`
 - `sync apply --bidirectional --apply --json --force`
