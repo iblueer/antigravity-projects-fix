@@ -166,6 +166,7 @@ class Summary:
     title: str
     project: str | None
     uris: tuple[str, ...]
+    payload: bytes = b""
 
 
 @dataclass
@@ -224,7 +225,22 @@ def split_timestamp(ts: float) -> tuple[int, int]:
 
 
 def parse_summaries(pb_path: Path) -> list[Summary]:
-    buf = pb_path.read_bytes()
+    return parse_summary_entries_from_bytes(pb_path.read_bytes())
+
+
+def parse_summary_payload(payload: bytes) -> tuple[str, str | None, tuple[str, ...]]:
+    title = first_string_msg(payload, 1) or ""
+    project = None
+    uris: list[str] = []
+    for sub_field, sub_wire, sub_start, sub_end in parse_fields(payload):
+        if sub_field == 17 and sub_wire == 2:
+            link = payload[sub_start:sub_end]
+            project = first_string_msg(link, 18)
+            uris = [norm_uri(u) for u in repeated_string_msg(link, 7)]
+    return title, project, tuple(sorted(set(uris)))
+
+
+def parse_summary_entries_from_bytes(buf: bytes, encoded_payload: bool = False) -> list[Summary]:
     summaries: list[Summary] = []
     for idx, (field, wire, start, end) in enumerate(parse_fields(buf)):
         if field != 1 or wire != 2:
@@ -234,16 +250,15 @@ def parse_summaries(pb_path: Path) -> list[Summary]:
         if len(entry_fields) < 2:
             continue
         cid = entry[entry_fields[0][2] : entry_fields[0][3]].decode("utf-8", "replace")
-        msg = entry[entry_fields[1][2] : entry_fields[1][3]]
-        title = first_string_msg(msg, 1) or ""
-        project = None
-        uris: list[str] = []
-        for sub_field, sub_wire, sub_start, sub_end in parse_fields(msg):
-            if sub_field == 17 and sub_wire == 2:
-                link = msg[sub_start:sub_end]
-                project = first_string_msg(link, 18)
-                uris = [norm_uri(u) for u in repeated_string_msg(link, 7)]
-        summaries.append(Summary(idx=idx, cid=cid, title=title, project=project, uris=tuple(sorted(set(uris)))))
+        raw_payload = entry[entry_fields[1][2] : entry_fields[1][3]]
+        payload = raw_payload
+        if encoded_payload:
+            try:
+                payload = base64.b64decode(raw_payload, validate=True)
+            except Exception:
+                payload = b""
+        title, project, uris = parse_summary_payload(payload) if payload else ("", None, ())
+        summaries.append(Summary(idx=idx, cid=cid, title=title, project=project, uris=uris, payload=payload))
     return summaries
 
 
@@ -472,39 +487,43 @@ def decode_state_value(value: str | bytes) -> bytes:
         return raw
 
 
-def extract_state_summary_payloads(user_dir: Path) -> dict[str, bytes]:
-    db_path = user_dir / "globalStorage" / "state.vscdb"
-    if not db_path.exists():
-        return {}
-    out: dict[str, bytes] = {}
-    key = "antigravityUnifiedStateSync.trajectorySummaries"
-    try:
-        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        try:
-            row = con.execute("select value from ItemTable where key=?", (key,)).fetchone()
-            if not row:
-                return out
-            decoded = decode_state_value(row[0])
-        finally:
-            con.close()
-    except Exception as exc:
-        print(f"WARN: cannot read state summaries from {db_path}: {exc}", file=sys.stderr)
-        return out
+def state_summary_db_path(user_dir: Path) -> Path:
+    return user_dir / "globalStorage" / "state.vscdb"
 
-    for match in UUID_RE.finditer(decoded):
-        cid = match.group().decode("ascii")
-        tail = decoded[match.end() : match.end() + 5000]
-        b64 = re.match(rb"[^A-Za-z0-9+/=]*([A-Za-z0-9+/=]{80,})", tail)
-        if not b64:
-            continue
-        try:
-            payload = base64.b64decode(b64.group(1), validate=True)
-            fields = parse_fields(payload)
-        except Exception:
-            continue
-        if first_string_msg(payload, 1) and any(field == 17 and wire == 2 for field, wire, _, _ in fields):
-            out[cid] = payload
-    return out
+
+def read_state_summary_row(user_dir: Path) -> tuple[str | bytes, bytes] | None:
+    db_path = state_summary_db_path(user_dir)
+    if not db_path.exists():
+        return None
+    key = "antigravityUnifiedStateSync.trajectorySummaries"
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        row = con.execute("select value from ItemTable where key=?", (key,)).fetchone()
+    finally:
+        con.close()
+    if not row:
+        return None
+    return row[0], decode_state_value(row[0])
+
+
+def parse_state_summaries(user_dir: Path) -> list[Summary]:
+    try:
+        row = read_state_summary_row(user_dir)
+    except Exception as exc:
+        print(f"WARN: cannot read state summaries from {state_summary_db_path(user_dir)}: {exc}", file=sys.stderr)
+        return []
+    if not row:
+        return []
+    _, decoded = row
+    try:
+        return parse_summary_entries_from_bytes(decoded, encoded_payload=True)
+    except Exception as exc:
+        print(f"WARN: cannot parse state summaries from {state_summary_db_path(user_dir)}: {exc}", file=sys.stderr)
+        return []
+
+
+def extract_state_summary_payloads(user_dir: Path) -> dict[str, bytes]:
+    return {summary.cid: summary.payload for summary in parse_state_summaries(user_dir) if summary.payload}
 
 
 def read_state_ids(user_dir: Path) -> dict[str, set[str]]:
@@ -612,11 +631,88 @@ def build_summary_entry_from_payload(cid: str, payload: bytes) -> bytes:
     return enc_bytes(1, entry)
 
 
+def build_state_summary_entry_from_payload(cid: str, payload: bytes) -> bytes:
+    entry = enc_string(1, cid)
+    entry += enc_bytes(2, base64.b64encode(payload))
+    return enc_bytes(1, entry)
+
+
 def backup_file(path: Path) -> Path:
     stamp = time.strftime("%Y%m%d-%H%M%S")
     backup = path.with_name(f"{path.name}.backup-{stamp}")
     backup.write_bytes(path.read_bytes())
     return backup
+
+
+def repair_state_summaries(
+    user_dir: Path,
+    summaries: list[Summary],
+    state_summaries: list[Summary],
+    projects: dict[str, Project],
+    apply: bool,
+) -> int:
+    state_ids = {s.cid for s in state_summaries}
+    summary_ids = {s.cid for s in summaries}
+    candidates = [s for s in summaries if s.cid not in state_ids and s.payload]
+    stale = [s for s in state_summaries if s.cid not in summary_ids]
+    print(f"State repair candidates: {len(candidates)}")
+    for summary in candidates:
+        pname = projects.get(summary.project).name if summary.project in projects else summary.project or "outside-of-project"
+        print(f"  + [{summary.idx}] {summary.cid} | {summary.title} | {pname}")
+    print(f"State records not in agyhub summary: {len(stale)}")
+    for summary in stale:
+        print(f"  - [{summary.idx}] {summary.cid} | {summary.title or '(unparsed)'}")
+    if not candidates and not stale:
+        return 0
+    if not apply:
+        print("Dry-run only. Add --apply to replace state.vscdb summaries with the 109 agyhub summaries.")
+        return 0
+
+    key = "antigravityUnifiedStateSync.trajectorySummaries"
+    db_path = state_summary_db_path(user_dir)
+    row = read_state_summary_row(user_dir)
+    if not row:
+        raise RuntimeError(f"state summary row not found: {db_path}")
+    value, original = row
+    parse_summary_entries_from_bytes(original, encoded_payload=True)
+    updated = b"".join(build_state_summary_entry_from_payload(summary.cid, summary.payload) for summary in summaries)
+    parsed = parse_summary_entries_from_bytes(updated, encoded_payload=True)
+    expected = {s.cid for s in summaries}
+    parsed_ids = {s.cid for s in parsed}
+    missing_after_build = expected - parsed_ids
+    unexpected_after_build = parsed_ids - expected
+    duplicate_ids = [cid for cid, count in Counter(s.cid for s in parsed).items() if count > 1]
+    if missing_after_build or unexpected_after_build or duplicate_ids:
+        raise RuntimeError(
+            "generated state summary failed validation: "
+            f"missing={missing_after_build}, unexpected={unexpected_after_build}, duplicates={duplicate_ids}"
+        )
+
+    if isinstance(value, str):
+        stored_value: str | bytes = base64.b64encode(updated).decode("ascii")
+    else:
+        stored_value = base64.b64encode(updated)
+
+    backup = backup_file(db_path)
+    con = sqlite3.connect(db_path)
+    try:
+        con.execute("update ItemTable set value=? where key=?", (stored_value, key))
+        con.commit()
+    except Exception:
+        con.rollback()
+        shutil.copy2(backup, db_path)
+        raise
+    finally:
+        con.close()
+
+    refreshed = parse_state_summaries(user_dir)
+    refreshed_ids = {s.cid for s in refreshed}
+    if expected - refreshed_ids:
+        shutil.copy2(backup, db_path)
+        raise RuntimeError("state summary validation failed after write; restored backup")
+    print(f"Applied: replaced state summary with {len(summaries)} record(s)")
+    print(f"Backup: {backup}")
+    return len(candidates) + len(stale)
 
 
 def repair_missing_summaries(
@@ -719,19 +815,23 @@ def run(args: argparse.Namespace) -> int:
     projects = load_projects(project_dir)
     summaries = parse_summaries(summary_path) if summary_path.exists() else []
     conversations = list_conversations(conv_dir) if conv_dir.exists() else {}
+    state_summaries = parse_state_summaries(user_dir)
     state_ids = read_state_ids(user_dir)
     state_payloads = extract_state_summary_payloads(user_dir)
 
     summary_ids = {s.cid for s in summaries}
+    state_summary_ids = {s.cid for s in state_summaries}
     current_project_ids = set(projects)
     orphan_summaries = [s for s in summaries if s.project and s.project not in current_project_ids and s.project != "outside-of-project"]
     missing_from_summary = [c for c in conversations.values() if c.cid not in summary_ids]
+    missing_from_state_summary = [s for s in summaries if s.cid not in state_summary_ids]
     recent_cutoff = time.time() - args.recent_hours * 3600
     recent_missing = [c for c in missing_from_summary if c.mtime >= recent_cutoff]
 
     print(f"Area: {args.area}")
     print(f"Projects: {len(projects)} from {project_dir}")
     print(f"Summaries: {len(summaries)} from {summary_path}")
+    print(f"State summaries: {len(state_summaries)} from {state_summary_db_path(user_dir)}")
     print(f"Conversations: {len(conversations)} from {conv_dir}")
     print()
 
@@ -770,6 +870,14 @@ def run(args: argparse.Namespace) -> int:
         print(f"  ... {len(shown) - args.limit} more")
     print()
 
+    print(f"Summaries missing from state: {len(missing_from_state_summary)}")
+    for summary in missing_from_state_summary[: args.limit]:
+        pname = projects.get(summary.project).name if summary.project in projects else summary.project or "outside-of-project"
+        print(f"  [{summary.idx}] {summary.cid} | {summary.title} | {pname}")
+    if len(missing_from_state_summary) > args.limit:
+        print(f"  ... {len(missing_from_state_summary) - args.limit} more")
+    print()
+
     print("Global state UUID references:")
     for key, ids in state_ids.items():
         missing = ids - summary_ids
@@ -779,18 +887,28 @@ def run(args: argparse.Namespace) -> int:
     print()
 
     if args.apply:
-        if not args.repair_missing_summary:
+        if not args.repair_missing_summary and not args.repair_state_summary:
             print("No changes made.")
-            print("Use --repair-missing-summary --apply to append missing agyhub summary records.")
+            print("Use --repair-missing-summary --apply or --repair-state-summary --apply.")
             return 2
-        repaired = repair_missing_summaries(summary_path, summaries, missing_from_summary, projects, state_payloads, apply=True)
-        refreshed = parse_summaries(summary_path)
-        refreshed_ids = {s.cid for s in refreshed}
-        still_missing = [c for c in conversations.values() if c.cid not in refreshed_ids]
-        print(f"Conversations missing from summary after repair: {len(still_missing)}")
+        repaired = 0
+        if args.repair_missing_summary:
+            repaired += repair_missing_summaries(summary_path, summaries, missing_from_summary, projects, state_payloads, apply=True)
+            refreshed = parse_summaries(summary_path)
+            refreshed_ids = {s.cid for s in refreshed}
+            still_missing = [c for c in conversations.values() if c.cid not in refreshed_ids]
+            print(f"Conversations missing from summary after repair: {len(still_missing)}")
+            summaries = refreshed
+        if args.repair_state_summary:
+            refreshed_state = parse_state_summaries(user_dir)
+            repaired += repair_state_summaries(user_dir, summaries, refreshed_state, projects, apply=True)
+            final_state_ids = {s.cid for s in parse_state_summaries(user_dir)}
+            print(f"Summaries missing from state after repair: {len({s.cid for s in summaries} - final_state_ids)}")
         return 0 if repaired else 1
     if args.repair_missing_summary:
         repair_missing_summaries(summary_path, summaries, missing_from_summary, projects, state_payloads, apply=False)
+    if args.repair_state_summary:
+        repair_state_summaries(user_dir, summaries, state_summaries, projects, apply=False)
     return 0
 
 
@@ -805,6 +923,7 @@ def main() -> int:
     parser.add_argument("--recent-only", action="store_true")
     parser.add_argument("--limit", type=int, default=40)
     parser.add_argument("--repair-missing-summary", action="store_true", help="append agyhub summaries for missing conversation DBs")
+    parser.add_argument("--repair-state-summary", action="store_true", help="append state.vscdb summaries from agyhub summaries")
     parser.add_argument("--apply", action="store_true", help="write repairs; otherwise reports only")
     return run(parser.parse_args())
 
