@@ -71,6 +71,8 @@ open dist/AgySessionTray.app
 
 如果在受限沙盒里运行脚本遇到 `sandbox-exec` 权限错误，请在 macOS 终端中直接执行同一条命令。
 
+从 Finder 或 Dock 启动时，App 不依赖终端 PATH，会自动查找 `/opt/homebrew/bin/node`、`/usr/local/bin/node` 等常见路径。Node 如果装在自定义位置，可以在启动环境里设置 `AGY_NODE_PATH`。
+
 功能：
 
 - 显示 Antigravity 和 Antigravity IDE 当前 Session、agyhub、state 数量。

@@ -8,6 +8,7 @@ struct ToolOutput {
 
 enum ToolError: LocalizedError {
     case scriptNotFound
+    case nodeNotFound(paths: [String])
     case failed(command: String, code: Int32, stderr: String)
     case invalidUTF8
 
@@ -15,6 +16,8 @@ enum ToolError: LocalizedError {
         switch self {
         case .scriptNotFound:
             return "找不到 agy_ide_fix_tool/src/cli.js"
+        case let .nodeNotFound(paths):
+            return "找不到 node。已检查：\(paths.joined(separator: ", "))"
         case let .failed(command, code, stderr):
             return "\(command) 失败，退出码 \(code)：\(stderr)"
         case .invalidUTF8:
@@ -25,9 +28,11 @@ enum ToolError: LocalizedError {
 
 struct ToolRunner {
     let cliPath: URL
+    let nodePath: URL
 
     init() throws {
         self.cliPath = try Self.findCliPath()
+        self.nodePath = try Self.findNodePath()
     }
 
     func doctor() async throws -> DoctorReport {
@@ -48,9 +53,10 @@ struct ToolRunner {
     private func run(arguments: [String]) async throws -> ToolOutput {
         try await withCheckedThrowingContinuation { continuation in
             let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            process.arguments = ["node", cliPath.path] + arguments
+            process.executableURL = nodePath
+            process.arguments = [cliPath.path] + arguments
             process.currentDirectoryURL = cliPath.deletingLastPathComponent().deletingLastPathComponent()
+            process.environment = Self.processEnvironment()
 
             let stdout = Pipe()
             let stderr = Pipe()
@@ -64,7 +70,7 @@ struct ToolRunner {
                 if process.terminationStatus == 0 {
                     continuation.resume(returning: ToolOutput(stdout: stdoutData, stderr: stderrText))
                 } else {
-                    let command = "node \(cliPath.path) \(arguments.joined(separator: " "))"
+                    let command = "\(nodePath.path) \(cliPath.path) \(arguments.joined(separator: " "))"
                     continuation.resume(throwing: ToolError.failed(command: command, code: process.terminationStatus, stderr: stderrText))
                 }
             }
@@ -75,6 +81,41 @@ struct ToolRunner {
                 continuation.resume(throwing: error)
             }
         }
+    }
+
+    private static func processEnvironment() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        let pathEntries = [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin"
+        ]
+        let existing = env["PATH"] ?? ""
+        env["PATH"] = (pathEntries + [existing]).filter { !$0.isEmpty }.joined(separator: ":")
+        return env
+    }
+
+    private static func findNodePath() throws -> URL {
+        let fm = FileManager.default
+        var candidates = [
+            "/opt/homebrew/bin/node",
+            "/usr/local/bin/node",
+            "/usr/bin/node",
+            "\(NSHomeDirectory())/.local/node/bin/node",
+            "\(NSHomeDirectory())/.npm-global/bin/node"
+        ]
+        if let envNode = ProcessInfo.processInfo.environment["AGY_NODE_PATH"] {
+            candidates.insert(envNode, at: 0)
+        }
+        for candidate in candidates {
+            if fm.isExecutableFile(atPath: candidate) {
+                return URL(fileURLWithPath: candidate)
+            }
+        }
+        throw ToolError.nodeNotFound(paths: candidates)
     }
 
     private static func findCliPath() throws -> URL {
