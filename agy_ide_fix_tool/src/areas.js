@@ -18,6 +18,7 @@ function areaConfig(name, flags = {}) {
   return {
     area,
     label: area === 'ag' ? 'Antigravity' : 'Antigravity IDE',
+    stateFormat: area === 'ag' ? 'direct-base64-payload' : 'wrapped-base64-payload',
     geminiDir,
     conversationDir: path.join(geminiDir, 'conversations'),
     agyhubSummaryPath: path.join(geminiDir, 'agyhub_summaries_proto.pb'),

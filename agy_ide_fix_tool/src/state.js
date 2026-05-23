@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { encodeBytes, encodeString, parseSummaryEntries } = require('./protobuf');
+const { encodeBytes, encodeString, parseFields, parseSummaryEntries } = require('./protobuf');
 
 const SUMMARY_KEY = 'antigravityUnifiedStateSync.trajectorySummaries';
 const AGENT_KEY = 'jetskiStateSync.agentManagerInitState';
@@ -29,13 +29,41 @@ function decodeBase64(value) {
   return Buffer.from(value, 'base64');
 }
 
-function readStateSummaries(dbPath) {
+function decodeStateSummaryEntries(decoded, stateFormat) {
+  if (stateFormat !== 'wrapped-base64-payload') {
+    return parseSummaryEntries(decoded, { encodedPayload: true, tolerant: true });
+  }
+  const entries = [];
+  let idx = 0;
+  for (const outer of parseFields(decoded)) {
+    if (outer.field !== 1 || outer.wire !== 2) continue;
+    const entry = decoded.subarray(outer.start, outer.end);
+    const entryFields = parseFields(entry);
+    const idField = entryFields.find((item) => item.field === 1 && item.wire === 2);
+    const payloadField = entryFields.find((item) => item.field === 2 && item.wire === 2);
+    if (!idField || !payloadField) continue;
+    const wrapper = entry.subarray(payloadField.start, payloadField.end);
+    const wrapperFields = parseFields(wrapper);
+    const wrapperPayloadField = wrapperFields.find((item) => item.field === 1 && item.wire === 2);
+    if (!wrapperPayloadField) continue;
+    const rebuiltEntry = Buffer.concat([
+      encodeString(1, entry.subarray(idField.start, idField.end).toString('utf8')),
+      encodeString(2, wrapper.subarray(wrapperPayloadField.start, wrapperPayloadField.end).toString('utf8')),
+    ]);
+    const rebuiltOuter = encodeBytes(1, rebuiltEntry);
+    const parsed = parseSummaryEntries(rebuiltOuter, { encodedPayload: true, tolerant: true })[0];
+    if (parsed) entries.push({ ...parsed, idx: idx++ });
+  }
+  return entries;
+}
+
+function readStateSummaries(dbPath, stateFormat = 'direct-base64-payload') {
   const row = sqliteValue(dbPath, SUMMARY_KEY);
   if (row.error || !row.value) return { summaries: [], ids: new Set(), error: row.error };
   if (row.value.length === 0) return { summaries: [], ids: new Set(), error: 'trajectorySummaries is empty' };
   try {
     const decoded = decodeBase64(row.value);
-    const summaries = parseSummaryEntries(decoded, { encodedPayload: true, tolerant: true });
+    const summaries = decodeStateSummaryEntries(decoded, stateFormat);
     return { summaries, ids: new Set(summaries.map((item) => item.cid)), error: null };
   } catch (error) {
     return { summaries: [], ids: new Set(), error: error.message };
@@ -49,7 +77,7 @@ function backupFile(filePath) {
   return backup;
 }
 
-function buildStateSummaryValue(agyhubSummaries) {
+function buildStateSummaryValue(agyhubSummaries, stateFormat = 'direct-base64-payload') {
   if (!Array.isArray(agyhubSummaries) || agyhubSummaries.length === 0) {
     throw new Error('refusing to build empty trajectorySummaries state value');
   }
@@ -58,9 +86,13 @@ function buildStateSummaryValue(agyhubSummaries) {
       throw new Error(`refusing to build invalid state summary entry for ${summary.cid || '(missing id)'}`);
     }
     const encodedPayload = Buffer.from(summary.payload).toString('base64');
+    const payloadField =
+      stateFormat === 'wrapped-base64-payload'
+        ? encodeBytes(2, encodeString(1, encodedPayload))
+        : encodeString(2, encodedPayload);
     const entry = Buffer.concat([
       encodeString(1, summary.cid),
-      encodeString(2, encodedPayload),
+      payloadField,
     ]);
     return encodeBytes(1, entry);
   });
@@ -75,7 +107,7 @@ function writeSqliteValue(dbPath, key, value) {
 }
 
 function mirrorStateFromAgyhub(area, agyhubSummaries, options = {}) {
-  const before = readStateSummaries(area.stateDbPath);
+  const before = readStateSummaries(area.stateDbPath, area.stateFormat);
   const beforeIds = before.ids;
   const agyhubIds = new Set(agyhubSummaries.map((item) => item.cid));
   const missing = agyhubSummaries.filter((item) => !beforeIds.has(item.cid));
@@ -91,12 +123,12 @@ function mirrorStateFromAgyhub(area, agyhubSummaries, options = {}) {
   };
   if (before.error) return result;
   if (!options.apply) return result;
-  const value = buildStateSummaryValue(agyhubSummaries);
+  const value = buildStateSummaryValue(agyhubSummaries, area.stateFormat);
   if (!value) throw new Error('refusing to write empty trajectorySummaries state value');
   const backup = backupFile(area.stateDbPath);
   result.backup = backup;
   writeSqliteValue(area.stateDbPath, SUMMARY_KEY, value);
-  const after = readStateSummaries(area.stateDbPath);
+  const after = readStateSummaries(area.stateDbPath, area.stateFormat);
   const afterIds = after.ids;
   const missingAfter = Array.from(agyhubIds).filter((id) => !afterIds.has(id));
   const staleAfter = Array.from(afterIds).filter((id) => !agyhubIds.has(id));
@@ -127,4 +159,12 @@ function readStateUuidRefs(dbPath) {
   return out;
 }
 
-module.exports = { mirrorStateFromAgyhub, readStateSummaries, readStateUuidRefs, SUMMARY_KEY, AGENT_KEY };
+module.exports = {
+  mirrorStateFromAgyhub,
+  readStateSummaries,
+  readStateUuidRefs,
+  buildStateSummaryValue,
+  decodeStateSummaryEntries,
+  SUMMARY_KEY,
+  AGENT_KEY,
+};

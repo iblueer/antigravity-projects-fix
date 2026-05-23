@@ -42,7 +42,7 @@ function difference(left, right) {
 function areaDoctor(area, projectInfo) {
   const conv = listConversations(area.conversationDir);
   const agyhub = readAgyhubSummaries(area.agyhubSummaryPath);
-  const state = readStateSummaries(area.stateDbPath);
+  const state = readStateSummaries(area.stateDbPath, area.stateFormat);
   const refs = readStateUuidRefs(area.stateDbPath);
   const convIds = new Set(conv.conversations.keys());
   const summaryIds = agyhub.ids;
