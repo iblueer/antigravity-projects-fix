@@ -32,6 +32,7 @@ function decodeBase64(value) {
 function readStateSummaries(dbPath) {
   const row = sqliteValue(dbPath, SUMMARY_KEY);
   if (row.error || !row.value) return { summaries: [], ids: new Set(), error: row.error };
+  if (row.value.length === 0) return { summaries: [], ids: new Set(), error: 'trajectorySummaries is empty' };
   try {
     const decoded = decodeBase64(row.value);
     const summaries = parseSummaryEntries(decoded, { encodedPayload: true, tolerant: true });
@@ -49,7 +50,13 @@ function backupFile(filePath) {
 }
 
 function buildStateSummaryValue(agyhubSummaries) {
+  if (!Array.isArray(agyhubSummaries) || agyhubSummaries.length === 0) {
+    throw new Error('refusing to build empty trajectorySummaries state value');
+  }
   const entries = agyhubSummaries.map((summary) => {
+    if (!summary.cid || !summary.payload || summary.payload.length === 0) {
+      throw new Error(`refusing to build invalid state summary entry for ${summary.cid || '(missing id)'}`);
+    }
     const encodedPayload = Buffer.from(summary.payload).toString('base64');
     const entry = Buffer.concat([
       encodeString(1, summary.cid),
@@ -85,6 +92,7 @@ function mirrorStateFromAgyhub(area, agyhubSummaries, options = {}) {
   if (before.error) return result;
   if (!options.apply) return result;
   const value = buildStateSummaryValue(agyhubSummaries);
+  if (!value) throw new Error('refusing to write empty trajectorySummaries state value');
   const backup = backupFile(area.stateDbPath);
   result.backup = backup;
   writeSqliteValue(area.stateDbPath, SUMMARY_KEY, value);
