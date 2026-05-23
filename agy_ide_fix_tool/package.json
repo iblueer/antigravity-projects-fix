@@ -1,0 +1,17 @@
+{
+  "name": "agy-ide-fix-tool",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Antigravity and Antigravity IDE session management tool.",
+  "type": "commonjs",
+  "bin": {
+    "agyfix-session": "src/cli.js"
+  },
+  "scripts": {
+    "doctor": "node src/cli.js doctor --all"
+  },
+  "engines": {
+    "node": ">=16.7.0"
+  },
+  "license": "MIT"
+}
