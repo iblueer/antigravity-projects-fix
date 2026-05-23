@@ -82,8 +82,21 @@ function buildSyncPlan(flags = {}) {
   const fileShapeConflicts = sharedConversationIds.filter((id) => !sameFileShape(agConvs.get(id), ideConvs.get(id)));
 
   return {
-    ag,
-    ide,
+    generatedAt: new Date().toISOString(),
+    ag: {
+      id: ag.area,
+      label: ag.label,
+      conversationDir: ag.conversationDir,
+      agyhubSummaryPath: ag.agyhubSummaryPath,
+      stateDbPath: ag.stateDbPath,
+    },
+    ide: {
+      id: ide.area,
+      label: ide.label,
+      conversationDir: ide.conversationDir,
+      agyhubSummaryPath: ide.agyhubSummaryPath,
+      stateDbPath: ide.stateDbPath,
+    },
     counts: {
       agConversations: agConvs.size,
       ideConversations: ideConvs.size,
@@ -156,6 +169,23 @@ function buildOneWaySyncPlan(flags = {}) {
   };
 }
 
+function oneWayPlanSummary(plan) {
+  return {
+    source: { id: plan.source.area, label: plan.source.label },
+    target: { id: plan.target.area, label: plan.target.label },
+    counts: {
+      conversationsToCopy: plan.conversationIds.length,
+      summariesToAdd: plan.summaryIds.length,
+      copyableConversationSummaryPairs: plan.copyableIds.length,
+      conversationsWithoutSourceSummary: plan.missingSummaryForConversation.length,
+    },
+    samples: {
+      copyableIds: plan.copyableIds.slice(0, 10),
+      conversationsWithoutSourceSummary: plan.missingSummaryForConversation.slice(0, 10),
+    },
+  };
+}
+
 function printOneWaySyncPlan(plan, apply) {
   console.log(`${plan.source.label} -> ${plan.target.label} sync ${apply ? 'apply' : 'plan'}`);
   console.log(`  conversations to copy: ${plan.conversationIds.length}`);
@@ -208,8 +238,30 @@ function applyOneWaySync(plan, flags) {
   }
 }
 
+function applyBidirectionalSync(flags = {}) {
+  const firstPlan = buildOneWaySyncPlan({ ...flags, from: 'ag', to: 'ide' });
+  const first = applyOneWaySync(firstPlan, flags);
+  const secondPlan = buildOneWaySyncPlan({ ...flags, from: 'ide', to: 'ag' });
+  const second = applyOneWaySync(secondPlan, flags);
+  return {
+    generatedAt: new Date().toISOString(),
+    directions: [
+      { plan: oneWayPlanSummary(firstPlan), result: first },
+      { plan: oneWayPlanSummary(secondPlan), result: second },
+    ],
+  };
+}
+
 function runSync(args = [], flags = {}) {
   const sub = args[0] || 'plan';
+  if (sub === 'plan' && flags.json && (flags.from || flags.to)) {
+    console.log(JSON.stringify(oneWayPlanSummary(buildOneWaySyncPlan(flags)), null, 2));
+    return 0;
+  }
+  if (sub === 'plan' && flags.json) {
+    console.log(JSON.stringify(buildSyncPlan(flags), null, 2));
+    return 0;
+  }
   if (sub === 'plan' && (flags.from || flags.to)) {
     const plan = buildOneWaySyncPlan(flags);
     printOneWaySyncPlan(plan, false);
@@ -221,7 +273,46 @@ function runSync(args = [], flags = {}) {
     return 0;
   }
   if (sub === 'apply') {
+    if (flags.bidirectional) {
+      const preview = {
+        generatedAt: new Date().toISOString(),
+        directions: [
+          oneWayPlanSummary(buildOneWaySyncPlan({ ...flags, from: 'ag', to: 'ide' })),
+          oneWayPlanSummary(buildOneWaySyncPlan({ ...flags, from: 'ide', to: 'ag' })),
+        ],
+      };
+      if (!flags.apply) {
+        if (flags.json) console.log(JSON.stringify({ applied: false, ...preview }, null, 2));
+        else {
+          console.log('Antigravity bidirectional sync apply');
+          for (const dir of preview.directions) {
+            console.log(`  ${dir.source.label} -> ${dir.target.label}`);
+            console.log(`    conversations to copy: ${dir.counts.conversationsToCopy}`);
+            console.log(`    summaries to add: ${dir.counts.summariesToAdd}`);
+          }
+          console.log('  applied: no');
+          console.log('  add --apply to copy files and update indexes');
+        }
+        return 0;
+      }
+      const result = applyBidirectionalSync(flags);
+      if (flags.json) console.log(JSON.stringify({ applied: true, ...result }, null, 2));
+      else {
+        console.log('Antigravity bidirectional sync apply');
+        for (const dir of result.directions) {
+          console.log(`  ${dir.plan.source.label} -> ${dir.plan.target.label}`);
+          console.log(`    copied conversations: ${dir.result.copied}`);
+          console.log(`    added summaries: ${dir.result.summaries}`);
+        }
+        console.log('  applied: yes');
+      }
+      return 0;
+    }
     const plan = buildOneWaySyncPlan(flags);
+    if (flags.json && !flags.apply) {
+      console.log(JSON.stringify({ applied: false, plan: oneWayPlanSummary(plan) }, null, 2));
+      return 0;
+    }
     printOneWaySyncPlan(plan, Boolean(flags.apply));
     if (!flags.apply) {
       console.log('  applied: no');
@@ -229,6 +320,10 @@ function runSync(args = [], flags = {}) {
       return 0;
     }
     const result = applyOneWaySync(plan, flags);
+    if (flags.json) {
+      console.log(JSON.stringify({ applied: true, plan: oneWayPlanSummary(plan), result }, null, 2));
+      return 0;
+    }
     console.log(`  applied: yes`);
     console.log(`  copied conversations: ${result.copied}`);
     console.log(`  added summaries: ${result.summaries}`);

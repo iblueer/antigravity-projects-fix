@@ -30,10 +30,13 @@ function printHelp() {
 
 Usage:
   agyfix-session doctor [--area ide|ag] [--all]
+  agyfix-session doctor --all --json
   agyfix-session repair state --area ide --mirror-agyhub [--apply]
   agyfix-session sync plan
+  agyfix-session sync plan --json
   agyfix-session sync plan --from ide --to ag
   agyfix-session sync apply --from ide --to ag [--apply]
+  agyfix-session sync apply --bidirectional [--apply] [--json]
 
 Options:
   --area <area>          Scan one area. Default: ide
@@ -41,6 +44,7 @@ Options:
   --home <path>          Override home directory
   --project-dir <path>   Override ~/.gemini/config/projects
   --force                Bypass running-process protection for write commands
+  --json                 Emit machine-readable JSON for doctor/sync
 `);
 }
 

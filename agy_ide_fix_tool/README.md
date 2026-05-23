@@ -18,9 +18,12 @@
 
 ```bash
 node agy_ide_fix_tool/src/cli.js doctor --all
+node agy_ide_fix_tool/src/cli.js doctor --all --json
 node agy_ide_fix_tool/src/cli.js sync plan
+node agy_ide_fix_tool/src/cli.js sync plan --json
 node agy_ide_fix_tool/src/cli.js sync plan --from ide --to ag
 node agy_ide_fix_tool/src/cli.js sync apply --from ide --to ag
+node agy_ide_fix_tool/src/cli.js sync apply --bidirectional
 node agy_ide_fix_tool/src/cli.js repair state --area ide --mirror-agyhub
 node agy_ide_fix_tool/src/cli.js repair state --area ag --mirror-agyhub
 ```
@@ -30,13 +33,39 @@ node agy_ide_fix_tool/src/cli.js repair state --area ag --mirror-agyhub
 ```bash
 node agy_ide_fix_tool/src/cli.js repair state --area ide --mirror-agyhub --apply
 node agy_ide_fix_tool/src/cli.js sync apply --from ide --to ag --apply
+node agy_ide_fix_tool/src/cli.js sync apply --bidirectional --apply
 ```
 
 写入会先备份 `state.vscdb`，写后重新解析验证。验证失败会恢复备份。
 
 ## 当前限制
 
-- `sync apply` 目前只支持单向复制缺失会话，并更新目标 agyhub/state。默认只预览。
+- `sync apply` 支持单向复制缺失会话，也支持 `--bidirectional` 顺序执行双向同步。默认只预览。
 - `repair state` 目前只修 state summary，不改 conversation 文件和项目配置。
 - 同 id 的 conversation 文件在 `Antigravity` 与 `Antigravity IDE` 中大小不同，后续同步实现不能直接覆盖。
 - 写入前应关闭 Antigravity / Antigravity IDE。写入命令已接入主进程保护，可用 `--force` 绕过。
+
+## macOS 菜单栏工具
+
+原型在 `macos_tray/`，使用 SwiftUI `MenuBarExtra` 实现。
+
+运行：
+
+```bash
+cd agy_ide_fix_tool/macos_tray
+AGY_FIX_TOOL_ROOT=/Users/maemolee/GitHub/antigravity-projects-fix/agy_ide_fix_tool swift run --scratch-path /tmp/agy-session-tray-build AgySessionTray
+```
+
+功能：
+
+- 显示 Antigravity 和 Antigravity IDE 当前 Session、agyhub、state 数量。
+- 显示健康状态和双向同步差异。
+- 手动点击双向同步。
+- 同步前会请求确认，然后退出 Antigravity 和 Antigravity IDE，确认退出后才写入。
+- 记录最后同步时间到 `~/Library/Application Support/AgySessionTray/state.json`。
+
+菜单栏工具调用 Node CLI：
+
+- `doctor --all --json`
+- `sync plan --json`
+- `sync apply --bidirectional --apply --json --force`
