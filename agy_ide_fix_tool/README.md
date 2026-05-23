@@ -50,7 +50,7 @@ node agy_ide_fix_tool/src/cli.js sync apply --bidirectional --apply
 
 ## macOS 菜单栏工具
 
-原型在 `macos_tray/`，使用 SwiftUI `MenuBarExtra` 实现。
+原型在 `macos_tray/`，使用 SwiftUI 实现。它是正常 macOS App，有 Dock 图标和主窗口，同时保留菜单栏入口。
 
 运行：
 
@@ -58,6 +58,18 @@ node agy_ide_fix_tool/src/cli.js sync apply --bidirectional --apply
 cd agy_ide_fix_tool/macos_tray
 AGY_FIX_TOOL_ROOT=/Users/maemolee/GitHub/antigravity-projects-fix/agy_ide_fix_tool swift run --scratch-path /tmp/agy-session-tray-build AgySessionTray
 ```
+
+打包成 `.app`：
+
+```bash
+cd agy_ide_fix_tool/macos_tray
+./build_app.sh
+open dist/AgySessionTray.app
+```
+
+生成的 `dist/AgySessionTray.app` 可以拖到 `/Applications`，也可以打开后在 Dock 里选择保留。
+
+如果在受限沙盒里运行脚本遇到 `sandbox-exec` 权限错误，请在 macOS 终端中直接执行同一条命令。
 
 功能：
 

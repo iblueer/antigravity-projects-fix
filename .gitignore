@@ -1,6 +1,7 @@
 # dependencies (this tool has none, but just in case)
 node_modules/
 .build/
+dist/
 
 # local backups produced by the tool
 *.backup-*/

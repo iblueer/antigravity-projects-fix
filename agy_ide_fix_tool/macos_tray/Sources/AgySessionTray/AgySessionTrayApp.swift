@@ -3,7 +3,7 @@ import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        NSApp.setActivationPolicy(.regular)
     }
 }
 
@@ -13,6 +13,16 @@ struct AgySessionTrayApp: App {
     @StateObject private var viewModel = StatusViewModel()
 
     var body: some Scene {
+        WindowGroup("Antigravity Sessions") {
+            StatusView()
+                .environmentObject(viewModel)
+                .frame(minWidth: 420, idealWidth: 460, minHeight: 620)
+                .task {
+                    await viewModel.refresh()
+                }
+        }
+        .windowResizability(.contentMinSize)
+
         MenuBarExtra {
             StatusView()
                 .environmentObject(viewModel)
