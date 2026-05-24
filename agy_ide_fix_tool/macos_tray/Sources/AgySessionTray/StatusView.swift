@@ -82,12 +82,19 @@ final class StatusViewModel: ObservableObject {
     var workspaceSyncCount: Int {
         (syncPlan?.counts.sidebarWorkspacesMissingInAg ?? 0) + (syncPlan?.counts.sidebarWorkspacesMissingInIde ?? 0)
     }
+    var hasStateReadError: Bool {
+        doctor?.areas.contains { area in
+            if area.errors?.state != nil { return true }
+            return area.errors?.stateRefs?.values.contains { $0 != nil } ?? false
+        } ?? false
+    }
 
     var syncDisabledReason: String? {
         if isBusy { return "正在处理当前任务" }
         if runner == nil { return "找不到命令行工具" }
         if errorMessage != nil { return "状态读取失败" }
         if doctor == nil || syncPlan == nil { return "还没有状态数据" }
+        if hasStateReadError { return "状态库异常，先修复 Session" }
         return nil
     }
 

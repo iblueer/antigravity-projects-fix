@@ -17,6 +17,7 @@ struct AreaReport: Decodable, Identifiable {
     let area: AreaIdentity
     let healthy: Bool
     let counts: AreaCounts
+    let errors: AreaErrors?
 
     var id: String { area.id }
 }
@@ -34,6 +35,13 @@ struct AreaCounts: Decodable {
     let agyhubMissingConversation: Int
     let agyhubMissingFromState: Int
     let stateMissingFromAgyhub: Int
+}
+
+struct AreaErrors: Decodable {
+    let conversations: String?
+    let agyhub: String?
+    let state: String?
+    let stateRefs: [String: String?]?
 }
 
 struct SyncPlan: Decodable {

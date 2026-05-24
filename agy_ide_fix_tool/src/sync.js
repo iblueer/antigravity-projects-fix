@@ -158,6 +158,9 @@ function buildSyncPlan(flags = {}) {
       contentConflicts: summarizeConflicts(conflicts).samples,
       ...workspaces.samples,
     },
+    errors: {
+      ...workspaces.errors,
+    },
   };
 }
 

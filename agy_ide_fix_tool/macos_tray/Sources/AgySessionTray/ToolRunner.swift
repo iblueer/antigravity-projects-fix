@@ -47,7 +47,7 @@ struct ToolRunner {
     }
 
     func doctor() async throws -> DoctorReport {
-        let output = try await run(arguments: ["doctor", "--all", "--json"])
+        let output = try await run(arguments: ["doctor", "--all", "--json"], allowedExitCodes: [0, 1])
         return try JSONDecoder().decode(DoctorReport.self, from: output.stdout)
     }
 
@@ -71,7 +71,7 @@ struct ToolRunner {
         return try JSONDecoder().decode(SummaryRepairResult.self, from: output.stdout)
     }
 
-    private func run(arguments: [String]) async throws -> ToolOutput {
+    private func run(arguments: [String], allowedExitCodes: Set<Int32> = [0]) async throws -> ToolOutput {
         try await withCheckedThrowingContinuation { continuation in
             let process = Process()
             process.executableURL = nodePath
@@ -88,7 +88,7 @@ struct ToolRunner {
                 let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
                 let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
                 let stderrText = String(data: stderrData, encoding: .utf8) ?? ""
-                if process.terminationStatus == 0 {
+                if allowedExitCodes.contains(process.terminationStatus) {
                     continuation.resume(returning: ToolOutput(stdout: stdoutData, stderr: stderrText))
                 } else {
                     let command = "\(nodePath.path) \(cliPath.path) \(arguments.joined(separator: " "))"

@@ -53,24 +53,34 @@ function backupFile(filePath, label) {
 }
 
 function readSidebarWorkspaces(area) {
-  const value = sqliteValue(area.stateDbPath, SIDEBAR_WORKSPACES_KEY);
-  if (!value) return { entries: [], byUri: new Map(), rawValue: value };
-  const decoded = Buffer.from(value, 'base64');
-  const entries = [];
-  for (const outer of parseFields(decoded)) {
-    if (outer.field !== 1 || outer.wire !== 2) continue;
-    const payload = decoded.subarray(outer.start, outer.end);
-    const inner = parseFields(payload);
-    const uriField = inner.find((item) => item.field === 1 && item.wire === 2);
-    if (!uriField) continue;
-    const uri = normalizeUri(payload.subarray(uriField.start, uriField.end).toString('utf8'));
-    entries.push({ uri, payload });
+  try {
+    const value = sqliteValue(area.stateDbPath, SIDEBAR_WORKSPACES_KEY);
+    if (!value) return { entries: [], byUri: new Map(), rawValue: value, error: null };
+    const decoded = Buffer.from(value, 'base64');
+    const entries = [];
+    for (const outer of parseFields(decoded)) {
+      if (outer.field !== 1 || outer.wire !== 2) continue;
+      const payload = decoded.subarray(outer.start, outer.end);
+      const inner = parseFields(payload);
+      const uriField = inner.find((item) => item.field === 1 && item.wire === 2);
+      if (!uriField) continue;
+      const uri = normalizeUri(payload.subarray(uriField.start, uriField.end).toString('utf8'));
+      entries.push({ uri, payload });
+    }
+    return {
+      entries,
+      byUri: new Map(entries.map((item) => [item.uri, item])),
+      rawValue: value,
+      error: null,
+    };
+  } catch (error) {
+    return {
+      entries: [],
+      byUri: new Map(),
+      rawValue: null,
+      error: error.message,
+    };
   }
-  return {
-    entries,
-    byUri: new Map(entries.map((item) => [item.uri, item])),
-    rawValue: value,
-  };
 }
 
 function encodeSidebarWorkspaces(entries) {
@@ -80,8 +90,12 @@ function encodeSidebarWorkspaces(entries) {
 function sidebarWorkspacePlan(ag, ide) {
   const agWorkspaces = readSidebarWorkspaces(ag);
   const ideWorkspaces = readSidebarWorkspaces(ide);
-  const missingInAg = ideWorkspaces.entries.filter((item) => !agWorkspaces.byUri.has(item.uri));
-  const missingInIde = agWorkspaces.entries.filter((item) => !ideWorkspaces.byUri.has(item.uri));
+  const missingInAg = agWorkspaces.error || ideWorkspaces.error
+    ? []
+    : ideWorkspaces.entries.filter((item) => !agWorkspaces.byUri.has(item.uri));
+  const missingInIde = agWorkspaces.error || ideWorkspaces.error
+    ? []
+    : agWorkspaces.entries.filter((item) => !ideWorkspaces.byUri.has(item.uri));
   return {
     agWorkspaces,
     ideWorkspaces,
@@ -94,6 +108,10 @@ function sidebarWorkspacePlan(ag, ide) {
     samples: {
       sidebarWorkspacesMissingInAg: missingInAg.slice(0, 10).map((item) => item.uri),
       sidebarWorkspacesMissingInIde: missingInIde.slice(0, 10).map((item) => item.uri),
+    },
+    errors: {
+      agSidebarWorkspaces: agWorkspaces.error,
+      ideSidebarWorkspaces: ideWorkspaces.error,
     },
   };
 }

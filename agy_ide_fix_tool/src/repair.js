@@ -1,6 +1,8 @@
 'use strict';
 
 const fs = require('fs');
+const path = require('path');
+const { execFileSync } = require('child_process');
 const { areaConfig } = require('./areas');
 const { parseSummaryEntries } = require('./protobuf');
 const { mirrorStateFromAgyhub } = require('./state');
@@ -8,6 +10,47 @@ const { applyMissingSummaryRepair } = require('./summary_repair');
 
 function readAgyhubSummaries(filePath) {
   return parseSummaryEntries(fs.readFileSync(filePath));
+}
+
+function stamp() {
+  return new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
+}
+
+function hasItemTable(filePath) {
+  try {
+    const out = execFileSync('sqlite3', ['-readonly', filePath, "select count(*) from ItemTable;"], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return /^\d+$/.test(out);
+  } catch (_) {
+    return false;
+  }
+}
+
+function latestValidStateBackup(stateDbPath) {
+  const dir = path.dirname(stateDbPath);
+  const base = path.basename(stateDbPath);
+  const files = fs.readdirSync(dir)
+    .filter((file) => file.startsWith(`${base}.`) && file.includes('backup'))
+    .map((file) => {
+      const fullPath = path.join(dir, file);
+      return { file, fullPath, mtimeMs: fs.statSync(fullPath).mtimeMs };
+    })
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return files.find((item) => fs.statSync(item.fullPath).size > 0 && hasItemTable(item.fullPath)) || null;
+}
+
+function restoreStateFromBackupIfNeeded(area, options = {}) {
+  if (hasItemTable(area.stateDbPath)) return { restored: false, backup: null, unreadableBackup: null };
+  if (!options.apply) return { restored: false, backup: null, unreadableBackup: null };
+  const backup = latestValidStateBackup(area.stateDbPath);
+  if (!backup) throw new Error(`Cannot read state and no valid backup found for ${area.stateDbPath}`);
+  const unreadableBackup = `${area.stateDbPath}.unreadable-backup-${stamp()}`;
+  if (fs.existsSync(area.stateDbPath)) fs.copyFileSync(area.stateDbPath, unreadableBackup);
+  fs.copyFileSync(backup.fullPath, area.stateDbPath);
+  if (!hasItemTable(area.stateDbPath)) throw new Error(`Restored backup is not readable: ${backup.fullPath}`);
+  return { restored: true, backup: backup.fullPath, unreadableBackup };
 }
 
 function runRepair(args = [], flags = {}) {
@@ -47,6 +90,7 @@ function runRepair(args = [], flags = {}) {
   }
   const area = areaConfig(flags.area || 'ide', flags);
   const summaries = readAgyhubSummaries(area.agyhubSummaryPath);
+  const restoredState = restoreStateFromBackupIfNeeded(area, { apply: Boolean(flags.apply) });
   const result = mirrorStateFromAgyhub(area, summaries, { apply: Boolean(flags.apply) });
   if (result.error) {
     console.error(`Cannot read state: ${result.error}`);
@@ -56,6 +100,7 @@ function runRepair(args = [], flags = {}) {
     console.log(JSON.stringify({
       area: { id: area.area, label: area.label },
       applied: Boolean(result.applied),
+      restoredState,
       ...result,
     }, null, 2));
     return 0;
@@ -67,6 +112,7 @@ function runRepair(args = [], flags = {}) {
   console.log(`  stale in state: ${result.staleCount}`);
   if (result.applied) {
     console.log(`  applied: yes`);
+    if (restoredState.restored) console.log(`  restored state backup: ${restoredState.backup}`);
     console.log(`  backup: ${result.backup}`);
   } else {
     console.log('  applied: no');
