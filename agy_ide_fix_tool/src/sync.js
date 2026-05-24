@@ -235,14 +235,28 @@ function printOneWaySyncPlan(plan, apply) {
 
 function applyOneWaySync(plan, flags) {
   assertNotRunning({ force: Boolean(flags.force) });
-  if (!plan.copyableIds.length && !plan.summaryIds.length) {
-    return { backups: { conversations: null, agyhub: null, state: null }, copied: 0, summaries: 0, stateBackup: null, skipped: true };
+  const beforeState = mirrorStateFromAgyhub(plan.target, Array.from(plan.targetSummaries.values()), { apply: false });
+  const needsStateRepair = !beforeState.error && (beforeState.missingCount > 0 || beforeState.staleCount > 0);
+  if (!plan.copyableIds.length && !plan.summaryIds.length && !needsStateRepair) {
+    return {
+      backups: { conversations: null, agyhub: null, state: null },
+      copied: 0,
+      summaries: 0,
+      stateBackup: null,
+      stateRepair: {
+        beforeCount: beforeState.beforeCount,
+        targetCount: beforeState.targetCount,
+        missingCount: beforeState.missingCount,
+        staleCount: beforeState.staleCount,
+      },
+      skipped: true,
+    };
   }
   fs.mkdirSync(plan.target.conversationDir, { recursive: true });
   const backups = {
-    conversations: fs.existsSync(plan.target.conversationDir) ? copyDirBackup(plan.target.conversationDir, 'sync') : null,
-    agyhub: fs.existsSync(plan.target.agyhubSummaryPath) ? copyFileBackup(plan.target.agyhubSummaryPath, 'sync') : null,
-    state: fs.existsSync(plan.target.stateDbPath) ? copyFileBackup(plan.target.stateDbPath, 'sync') : null,
+    conversations: plan.copyableIds.length && fs.existsSync(plan.target.conversationDir) ? copyDirBackup(plan.target.conversationDir, 'sync') : null,
+    agyhub: plan.summaryIds.length && fs.existsSync(plan.target.agyhubSummaryPath) ? copyFileBackup(plan.target.agyhubSummaryPath, 'sync') : null,
+    state: (plan.summaryIds.length || needsStateRepair) && fs.existsSync(plan.target.stateDbPath) ? copyFileBackup(plan.target.stateDbPath, 'sync') : null,
   };
   try {
     for (const id of plan.copyableIds) {
@@ -264,7 +278,18 @@ function applyOneWaySync(plan, flags) {
       if (!reparsed.has(id)) throw new Error(`summary write validation failed for ${id}`);
     }
     const stateResult = mirrorStateFromAgyhub(plan.target, Array.from(reparsed.values()), { apply: true });
-    return { backups, copied: plan.copyableIds.length, summaries: plan.summaryIds.length, stateBackup: stateResult.backup };
+    return {
+      backups,
+      copied: plan.copyableIds.length,
+      summaries: plan.summaryIds.length,
+      stateBackup: stateResult.backup,
+      stateRepair: {
+        beforeCount: stateResult.beforeCount,
+        targetCount: stateResult.targetCount,
+        missingCount: stateResult.missingCount,
+        staleCount: stateResult.staleCount,
+      },
+    };
   } catch (error) {
     if (backups.conversations) {
       fs.rmSync(plan.target.conversationDir, { recursive: true, force: true });

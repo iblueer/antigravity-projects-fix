@@ -50,6 +50,16 @@ struct ToolRunner {
         return try JSONDecoder().decode(SyncResult.self, from: output.stdout)
     }
 
+    func repairState(area: String) async throws -> RepairResult {
+        let output = try await run(arguments: ["repair", "state", "--area", area, "--mirror-agyhub", "--apply", "--json", "--force"])
+        return try JSONDecoder().decode(RepairResult.self, from: output.stdout)
+    }
+
+    func repairMissingSummaries(area: String) async throws -> SummaryRepairResult {
+        let output = try await run(arguments: ["repair", "summary", "--area", area, "--apply", "--json", "--force"])
+        return try JSONDecoder().decode(SummaryRepairResult.self, from: output.stdout)
+    }
+
     private func run(arguments: [String]) async throws -> ToolOutput {
         try await withCheckedThrowingContinuation { continuation in
             let process = Process()

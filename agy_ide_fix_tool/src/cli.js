@@ -32,6 +32,7 @@ Usage:
   agyfix-session doctor [--area ide|ag] [--all]
   agyfix-session doctor --all --json
   agyfix-session repair state --area ide --mirror-agyhub [--apply]
+  agyfix-session repair summary --area ide [--id <conversation-id>] [--apply]
   agyfix-session sync plan
   agyfix-session sync plan --json
   agyfix-session sync conflicts [--json]
@@ -45,6 +46,7 @@ Options:
   --home <path>          Override home directory
   --project-dir <path>   Override ~/.gemini/config/projects
   --force                Bypass running-process protection for write commands
+  --id <conversation-id> Repair one missing summary id
   --json                 Emit machine-readable JSON for doctor/sync
 `);
 }

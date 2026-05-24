@@ -74,6 +74,7 @@ struct OneWayPlan: Decodable {
 struct OneWayResult: Decodable {
     let copied: Int
     let summaries: Int
+    let stateRepair: RepairResult?
 }
 
 struct SyncConflictApplyResult: Decodable {
@@ -93,6 +94,35 @@ struct SyncConflictCounts: Decodable {
 struct SyncConflictOperation: Decodable {
     let cid: String
     let action: String
+}
+
+struct RepairResult: Decodable {
+    let area: AreaIdentity?
+    let applied: Bool?
+    let beforeCount: Int
+    let targetCount: Int
+    let missingCount: Int
+    let staleCount: Int
+    let backup: String?
+}
+
+struct SummaryRepairResult: Decodable {
+    let area: AreaIdentity
+    let applied: Bool
+    let missingCount: Int
+    let repairableCount: Int
+    let skippedCount: Int
+    let repairedCount: Int
+    let items: [SummaryRepairItem]
+}
+
+struct SummaryRepairItem: Decodable {
+    let cid: String
+    let canRepair: Bool
+    let reasons: [String]
+    let title: String?
+    let workspaceUri: String?
+    let project: String?
 }
 
 struct PersistedState: Codable {

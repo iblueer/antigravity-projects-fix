@@ -151,4 +151,4 @@ function parseSummaryEntries(buf, options = {}) {
   return summaries;
 }
 
-module.exports = { readVarint, encodeBytes, encodeString, parseFields, parseSummaryEntries };
+module.exports = { readVarint, encodeVarint, encodeBytes, encodeString, parseFields, parseSummaryEntries };

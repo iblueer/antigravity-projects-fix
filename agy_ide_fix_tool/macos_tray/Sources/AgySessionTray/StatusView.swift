@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UserNotifications
 
 enum OverallStatus {
     case loading
@@ -42,7 +43,6 @@ final class StatusViewModel: ObservableObject {
     @Published var persisted: PersistedState
     @Published var isBusy = false
     @Published var errorMessage: String?
-    @Published var showSyncConfirmation = false
 
     private let store = SyncStore()
     private let runner: ToolRunner?
@@ -87,6 +87,16 @@ final class StatusViewModel: ObservableObject {
     }
 
     var canSync: Bool { syncDisabledReason == nil }
+
+    var repairDisabledReason: String? {
+        if isBusy { return "正在处理当前任务" }
+        if runner == nil { return "找不到命令行工具" }
+        if errorMessage != nil { return "状态读取失败" }
+        if doctor == nil { return "还没有状态数据" }
+        return nil
+    }
+
+    var canRepair: Bool { repairDisabledReason == nil }
 
     var lastSyncText: String {
         guard let last = persisted.lastSyncAt else { return "无记录" }
@@ -164,12 +174,54 @@ final class StatusViewModel: ObservableObject {
             }
             store.save(persisted)
             errorMessage = nil
+            notifyIfUnhealthy()
         } catch {
             persisted.lastSyncAt = Date()
             persisted.lastSyncStatus = "failed"
             persisted.lastSyncMessage = error.localizedDescription
             store.save(persisted)
             errorMessage = error.localizedDescription
+            notify(title: "同步失败", body: error.localizedDescription)
+        }
+    }
+
+    func repairIndexes() async {
+        guard !isBusy else { return }
+        isBusy = true
+        defer { isBusy = false }
+        do {
+            guard let runner else {
+                throw NSError(domain: "AgySessionTray", code: 2, userInfo: [NSLocalizedDescriptionKey: "找不到 agy_ide_fix_tool/src/cli.js"])
+            }
+            let closed = await AppCloser.closeAndWait()
+            guard closed else {
+                throw NSError(domain: "AgySessionTray", code: 1, userInfo: [NSLocalizedDescriptionKey: "Antigravity 或 Antigravity IDE 未能在 20 秒内退出，修复已取消。"])
+            }
+
+            let agRepair = try await runner.repairState(area: "ag")
+            let ideRepair = try await runner.repairState(area: "ide")
+            let agSummaryRepair = try await runner.repairMissingSummaries(area: "ag")
+            let ideSummaryRepair = try await runner.repairMissingSummaries(area: "ide")
+            doctor = try await runner.doctor()
+            syncPlan = try await runner.syncPlan()
+            persisted.lastSyncAt = Date()
+            persisted.lastSyncStatus = "success"
+            persisted.lastSyncMessage = repairMessage(
+                ag: agRepair,
+                ide: ideRepair,
+                agSummary: agSummaryRepair,
+                ideSummary: ideSummaryRepair
+            )
+            store.save(persisted)
+            errorMessage = nil
+            notifyIfUnhealthy()
+        } catch {
+            persisted.lastSyncAt = Date()
+            persisted.lastSyncStatus = "failed"
+            persisted.lastSyncMessage = error.localizedDescription
+            store.save(persisted)
+            errorMessage = error.localizedDescription
+            notify(title: "修复失败", body: error.localizedDescription)
         }
     }
 
@@ -198,10 +250,49 @@ final class StatusViewModel: ObservableObject {
             NSWorkspace.shared.open(fallbackDirectory)
         }
     }
+
+    private func notifyIfUnhealthy() {
+        let unhealthy = doctor?.areas.filter { !$0.healthy } ?? []
+        guard !unhealthy.isEmpty else { return }
+        let details = unhealthy.map { area in
+            "\(area.area.label)：未入历史索引 \(area.counts.conversationMissingFromAgyhub)，未入界面索引 \(area.counts.agyhubMissingFromState)"
+        }.joined(separator: "；")
+        notify(title: "仍有 Session 索引问题", body: details)
+    }
+
+    private func notify(title: String, body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    private func repairMessage(ag: RepairResult, ide: RepairResult, agSummary: SummaryRepairResult, ideSummary: SummaryRepairResult) -> String {
+        let fixed = ag.missingCount + ag.staleCount + ide.missingCount + ide.staleCount
+        let summaries = agSummary.repairedCount + ideSummary.repairedCount
+        let skipped = agSummary.skippedCount + ideSummary.skippedCount
+        let remaining = doctor?.areas.reduce(0) { total, area in
+            total + area.counts.conversationMissingFromAgyhub + area.counts.agyhubMissingFromState + area.counts.stateMissingFromAgyhub
+        } ?? 0
+        let handled = fixed + summaries
+        if handled == 0 {
+            if skipped > 0 { return "索引检查完成；\(skipped) 条缺失 summary 缺少可用 brain 信息，未写入" }
+            return remaining == 0 ? "索引检查完成，未发现需要修复的项目" : "索引检查完成；仍有 \(remaining) 个问题需要其他处理"
+        }
+        var parts = ["索引修复完成"]
+        if fixed > 0 { parts.append("界面索引 \(fixed) 项") }
+        if summaries > 0 { parts.append("历史 summary \(summaries) 条") }
+        if skipped > 0 { parts.append("跳过 \(skipped) 条") }
+        if remaining > 0 { parts.append("仍有 \(remaining) 个问题") }
+        return parts.joined(separator: "，")
+    }
 }
 
 struct DashboardView: View {
     @EnvironmentObject private var viewModel: StatusViewModel
+    @State private var showSyncConfirmation = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -227,10 +318,10 @@ struct DashboardView: View {
                 .padding(20)
             }
 
-            ActionBar()
+            ActionBar(showSyncConfirmation: $showSyncConfirmation)
         }
         .background(.background)
-        .alert("开始双向同步？", isPresented: $viewModel.showSyncConfirmation) {
+        .alert("开始双向同步？", isPresented: $showSyncConfirmation) {
             Button("取消", role: .cancel) {}
             Button("关闭并同步", role: .destructive) {
                 Task { await viewModel.syncNow() }
@@ -270,6 +361,8 @@ struct DashboardView: View {
 
 struct MenuStatusView: View {
     @EnvironmentObject private var viewModel: StatusViewModel
+    @Environment(\.openWindow) private var openWindow
+    @State private var showSyncConfirmation = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -298,12 +391,6 @@ struct MenuStatusView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            if let reason = viewModel.syncDisabledReason {
-                Text(reason)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
             Divider()
 
             HStack {
@@ -314,10 +401,17 @@ struct MenuStatusView: View {
                 }
                 .disabled(viewModel.isBusy)
 
+                Button {
+                    Task { await viewModel.repairIndexes() }
+                } label: {
+                    Label("修复 Session", systemImage: "wrench.and.screwdriver")
+                }
+                .disabled(!viewModel.canRepair)
+
                 Spacer()
 
                 Button {
-                    viewModel.showSyncConfirmation = true
+                    showSyncConfirmation = true
                 } label: {
                     Label("同步", systemImage: "arrow.left.arrow.right")
                 }
@@ -325,14 +419,17 @@ struct MenuStatusView: View {
             }
 
             HStack {
-                Button("打开日志") { viewModel.openLog() }
+                Button("打开主界面") {
+                    NSApp.activate(ignoringOtherApps: true)
+                    openWindow(id: "main")
+                }
                 Spacer()
                 Button("退出") { NSApp.terminate(nil) }
             }
         }
         .padding(14)
         .frame(width: 320)
-        .alert("开始双向同步？", isPresented: $viewModel.showSyncConfirmation) {
+        .alert("开始双向同步？", isPresented: $showSyncConfirmation) {
             Button("取消", role: .cancel) {}
             Button("关闭并同步", role: .destructive) {
                 Task { await viewModel.syncNow() }
@@ -448,6 +545,7 @@ struct SyncPlanPanel: View {
 
 struct ActionBar: View {
     @EnvironmentObject private var viewModel: StatusViewModel
+    @Binding var showSyncConfirmation: Bool
 
     var body: some View {
         HStack(spacing: 10) {
@@ -476,6 +574,13 @@ struct ActionBar: View {
                 Label("分叉副本", systemImage: "square.stack.3d.up")
             }
 
+            Button {
+                Task { await viewModel.repairIndexes() }
+            } label: {
+                Label("修复 Session", systemImage: "wrench.and.screwdriver")
+            }
+            .disabled(!viewModel.canRepair)
+
             Spacer()
 
             if let reason = viewModel.syncDisabledReason {
@@ -485,7 +590,7 @@ struct ActionBar: View {
             }
 
             Button {
-                viewModel.showSyncConfirmation = true
+                showSyncConfirmation = true
             } label: {
                 Label(viewModel.isBusy ? "同步中" : "双向同步", systemImage: "arrow.left.arrow.right")
                     .frame(minWidth: 112)

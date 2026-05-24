@@ -4,6 +4,7 @@ const fs = require('fs');
 const { areaConfig } = require('./areas');
 const { parseSummaryEntries } = require('./protobuf');
 const { mirrorStateFromAgyhub } = require('./state');
+const { applyMissingSummaryRepair } = require('./summary_repair');
 
 function readAgyhubSummaries(filePath) {
   return parseSummaryEntries(fs.readFileSync(filePath));
@@ -11,6 +12,31 @@ function readAgyhubSummaries(filePath) {
 
 function runRepair(args = [], flags = {}) {
   const target = args[0] || '';
+  if (target === 'summary') {
+    const result = applyMissingSummaryRepair(flags);
+    if (flags.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return 0;
+    }
+    console.log(`${result.area.label} missing summary repair`);
+    console.log(`  missing summaries: ${result.missingCount}`);
+    console.log(`  repairable: ${result.repairableCount}`);
+    console.log(`  skipped: ${result.skippedCount}`);
+    for (const item of result.items.slice(0, 10)) {
+      console.log(`  ${item.cid}: ${item.canRepair ? item.title : item.reasons.join('; ')}`);
+    }
+    if (result.applied) {
+      console.log('  applied: yes');
+      console.log(`  repaired: ${result.repairedCount}`);
+      console.log(`  agyhub backup: ${result.backups.agyhub}`);
+      console.log(`  state backup: ${result.backups.state}`);
+      console.log(`  state mirror backup: ${result.backups.stateMirror}`);
+    } else {
+      console.log('  applied: no');
+      console.log('  add --apply to append repairable summaries and update state.vscdb');
+    }
+    return 0;
+  }
   if (target !== 'state') {
     console.error(`Unknown repair target: ${target || '(missing)'}`);
     return 2;
@@ -25,6 +51,14 @@ function runRepair(args = [], flags = {}) {
   if (result.error) {
     console.error(`Cannot read state: ${result.error}`);
     return 1;
+  }
+  if (flags.json) {
+    console.log(JSON.stringify({
+      area: { id: area.area, label: area.label },
+      applied: Boolean(result.applied),
+      ...result,
+    }, null, 2));
+    return 0;
   }
   console.log(`${area.label} state repair`);
   console.log(`  state summaries before: ${result.beforeCount}`);

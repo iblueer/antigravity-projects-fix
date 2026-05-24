@@ -1,9 +1,11 @@
 import AppKit
 import SwiftUI
+import UserNotifications
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 }
 
@@ -13,7 +15,7 @@ struct AgySessionTrayApp: App {
     @StateObject private var viewModel = StatusViewModel()
 
     var body: some Scene {
-        WindowGroup("Antigravity Sessions") {
+        WindowGroup("Antigravity Sessions", id: "main") {
             DashboardView()
                 .environmentObject(viewModel)
                 .frame(minWidth: 740, idealWidth: 780, minHeight: 560, idealHeight: 620)
