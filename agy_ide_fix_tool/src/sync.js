@@ -73,9 +73,14 @@ function sameFileShape(a, b) {
 }
 
 function summarizeConflicts(conflicts, limit = 10) {
+  const actionable = conflicts.items.filter((item) => (
+    item.decision.action === 'replace-ag-from-ide' ||
+    item.decision.action === 'replace-ide-from-ag' ||
+    item.decision.action === 'keep-both'
+  ));
   return {
     counts: conflicts.counts,
-    samples: conflicts.items.slice(0, limit).map((item) => ({
+    samples: actionable.slice(0, limit).map((item) => ({
       cid: item.cid,
       action: item.decision.action,
       reason: item.decision.reason,
@@ -132,11 +137,14 @@ function buildSyncPlan(flags = {}) {
       agSummaryMissingInIde: diffIds(agSummaries, ideSummaries).length,
       ideSummaryMissingInAg: diffIds(ideSummaries, agSummaries).length,
       fileShapeConflicts: fileShapeConflicts.length,
-      contentConflicts: conflicts.counts.total,
+      rawFileDifferences: fileShapeConflicts.length,
+      equivalentFileDifferences: conflicts.counts.skippedSameSummary + conflicts.counts.skippedStableMetadata,
+      contentConflicts: conflicts.counts.autoReplaceAgFromIde + conflicts.counts.autoReplaceIdeFromAg + conflicts.counts.keepBoth,
       autoReplaceAgFromIde: conflicts.counts.autoReplaceAgFromIde,
       autoReplaceIdeFromAg: conflicts.counts.autoReplaceIdeFromAg,
       keepBothConflicts: conflicts.counts.keepBoth,
       skippedSameSummaryConflicts: conflicts.counts.skippedSameSummary,
+      skippedStableMetadataConflicts: conflicts.counts.skippedStableMetadata,
     },
     samples: {
       agConversationMissingInIde: diffIds(agConvs, ideConvs).slice(0, 10),
@@ -159,8 +167,9 @@ function printSyncPlan(plan) {
   console.log(`  conversations only in Antigravity IDE: ${plan.counts.ideConversationMissingInAg}`);
   console.log(`  summaries only in Antigravity: ${plan.counts.agSummaryMissingInIde}`);
   console.log(`  summaries only in Antigravity IDE: ${plan.counts.ideSummaryMissingInAg}`);
-  console.log(`  same-id file size conflicts: ${plan.counts.fileShapeConflicts}`);
-  console.log(`  same-id content conflicts: ${plan.counts.contentConflicts}`);
+  console.log(`  same-id raw file differences: ${plan.counts.rawFileDifferences}`);
+  console.log(`  equivalent file differences: ${plan.counts.equivalentFileDifferences}`);
+  console.log(`  actionable content conflicts: ${plan.counts.contentConflicts}`);
   console.log(`  auto replace Antigravity from IDE: ${plan.counts.autoReplaceAgFromIde}`);
   console.log(`  auto replace IDE from Antigravity: ${plan.counts.autoReplaceIdeFromAg}`);
   console.log(`  keep both conflicts: ${plan.counts.keepBothConflicts}`);
@@ -385,6 +394,7 @@ function runSync(args = [], flags = {}) {
       console.log(`  auto replace IDE from Antigravity: ${result.counts.autoReplaceIdeFromAg}`);
       console.log(`  keep both: ${result.counts.keepBoth}`);
       console.log(`  skipped same summary: ${result.counts.skippedSameSummary}`);
+      console.log(`  skipped stable metadata: ${result.counts.skippedStableMetadata}`);
       console.log(`  log path: ${result.logPath}`);
       for (const sample of result.samples) console.log(`  sample ${sample.cid}: ${sample.action} (${sample.reason})`);
     }

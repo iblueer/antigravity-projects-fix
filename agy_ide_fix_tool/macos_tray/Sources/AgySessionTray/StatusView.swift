@@ -76,6 +76,8 @@ final class StatusViewModel: ObservableObject {
     }
     var pendingForkCount: Int { syncPlan?.counts.keepBothConflicts ?? 0 }
     var skippedSameSummaryCount: Int { syncPlan?.counts.skippedSameSummaryConflicts ?? 0 }
+    var skippedStableMetadataCount: Int { syncPlan?.counts.skippedStableMetadataConflicts ?? 0 }
+    var equivalentFileDifferenceCount: Int { syncPlan?.counts.equivalentFileDifferences ?? skippedSameSummaryCount + skippedStableMetadataCount }
     var contentConflictCount: Int { syncPlan?.counts.contentConflicts ?? 0 }
 
     var syncDisabledReason: String? {
@@ -517,12 +519,14 @@ struct SyncPlanPanel: View {
                 Divider()
 
                 MetricsGrid(rows: [
-                    ("会话文件不同", viewModel.syncPlan?.counts.fileShapeConflicts ?? 0),
-                    ("内容进度不同", viewModel.contentConflictCount),
+                    ("原始文件差异", viewModel.syncPlan?.counts.rawFileDifferences ?? viewModel.syncPlan?.counts.fileShapeConflicts ?? 0),
+                    ("等价稳定差异", viewModel.equivalentFileDifferenceCount),
+                    ("需处理冲突", viewModel.contentConflictCount),
                     ("IDE 版本更新", viewModel.syncPlan?.counts.autoReplaceAgFromIde ?? 0),
                     ("AG 版本更新", viewModel.syncPlan?.counts.autoReplaceIdeFromAg ?? 0),
                     ("无法判断，保留副本", viewModel.pendingForkCount),
-                    ("摘要相同，跳过", viewModel.skippedSameSummaryCount)
+                    ("摘要完全相同", viewModel.skippedSameSummaryCount),
+                    ("仅元信息不同", viewModel.skippedStableMetadataCount)
                 ])
             }
         }

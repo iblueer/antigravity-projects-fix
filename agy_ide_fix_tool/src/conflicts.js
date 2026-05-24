@@ -5,7 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { readVarint, parseFields } = require('./protobuf');
+const { encodeBytes, encodeVarint, readVarint, parseFields } = require('./protobuf');
 
 function appSupportDir() {
   if (process.env.AGY_SESSION_TRAY_DIR) return process.env.AGY_SESSION_TRAY_DIR;
@@ -32,6 +32,26 @@ function sha256(filePath) {
   const hash = crypto.createHash('sha256');
   hash.update(fs.readFileSync(filePath));
   return hash.digest('hex');
+}
+
+function bufferHash(buf) {
+  return crypto.createHash('sha256').update(buf).digest('hex');
+}
+
+function encodeKey(field, wire) {
+  return encodeVarint(field * 8 + wire);
+}
+
+function canonicalSummaryPayload(payload) {
+  if (!payload || !payload.length) return Buffer.alloc(0);
+  const chunks = [];
+  for (const item of parseFields(payload)) {
+    if (item.field === 15) continue;
+    const value = payload.subarray(item.start, item.end);
+    if (item.wire === 2) chunks.push(encodeBytes(item.field, value));
+    else chunks.push(Buffer.concat([encodeKey(item.field, item.wire), value]));
+  }
+  return Buffer.concat(chunks);
 }
 
 function sqliteScalar(dbPath, sql) {
@@ -68,10 +88,12 @@ function summaryMetrics(summary) {
     stepCount: null,
     updatedAtMs: null,
     payloadHash: null,
+    canonicalPayloadHash: null,
   };
   if (!out.hasSummary) return out;
-  out.payloadHash = crypto.createHash('sha256').update(summary.payload).digest('hex');
+  out.payloadHash = bufferHash(summary.payload);
   try {
+    out.canonicalPayloadHash = bufferHash(canonicalSummaryPayload(summary.payload));
     for (const item of parseFields(summary.payload)) {
       if (item.field === 2 && item.wire === 0) out.stepCount = readVarint(summary.payload, item.start).value;
       if ((item.field === 3 || item.field === 10) && item.wire === 2) {
@@ -127,6 +149,13 @@ function decideConflict(agItem, ideItem) {
   if (agItem.summary.payloadHash && ideItem.summary.payloadHash && agItem.summary.payloadHash === ideItem.summary.payloadHash) {
     return { action: 'skip-same-summary', reason: 'summary payload matches even though conversation file differs' };
   }
+  if (
+    agItem.summary.canonicalPayloadHash &&
+    ideItem.summary.canonicalPayloadHash &&
+    agItem.summary.canonicalPayloadHash === ideItem.summary.canonicalPayloadHash
+  ) {
+    return { action: 'skip-stable-metadata', reason: 'summary differs only in stable local metadata field 15' };
+  }
   if (Number.isFinite(agItem.updatedAtMs) && Number.isFinite(ideItem.updatedAtMs) && Math.abs(agItem.updatedAtMs - ideItem.updatedAtMs) > 1000) {
     return agItem.updatedAtMs > ideItem.updatedAtMs
       ? { action: 'replace-ide-from-ag', winner: 'ag', loser: 'ide', reason: 'Antigravity summary updatedAt is newer' }
@@ -151,6 +180,7 @@ function analyzeSharedConflicts(ag, ide, agConvs, ideConvs, agSummaries, ideSumm
     autoReplaceIdeFromAg: items.filter((item) => item.decision.action === 'replace-ide-from-ag').length,
     keepBoth: items.filter((item) => item.decision.action === 'keep-both').length,
     skippedSameSummary: items.filter((item) => item.decision.action === 'skip-same-summary').length,
+    skippedStableMetadata: items.filter((item) => item.decision.action === 'skip-stable-metadata').length,
   };
   return { counts, items };
 }

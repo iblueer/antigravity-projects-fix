@@ -47,11 +47,14 @@ struct SyncCounts: Decodable {
     let agSummaryMissingInIde: Int
     let ideSummaryMissingInAg: Int
     let fileShapeConflicts: Int
+    let rawFileDifferences: Int?
+    let equivalentFileDifferences: Int?
     let contentConflicts: Int?
     let autoReplaceAgFromIde: Int?
     let autoReplaceIdeFromAg: Int?
     let keepBothConflicts: Int?
     let skippedSameSummaryConflicts: Int?
+    let skippedStableMetadataConflicts: Int?
 }
 
 struct SyncResult: Decodable {
@@ -89,6 +92,7 @@ struct SyncConflictCounts: Decodable {
     let autoReplaceIdeFromAg: Int
     let keepBoth: Int
     let skippedSameSummary: Int
+    let skippedStableMetadata: Int?
 }
 
 struct SyncConflictOperation: Decodable {

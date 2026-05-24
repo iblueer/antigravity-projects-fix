@@ -18,8 +18,9 @@ struct AgySessionTrayApp: App {
         WindowGroup("Antigravity Sessions", id: "main") {
             DashboardView()
                 .environmentObject(viewModel)
-                .frame(minWidth: 740, idealWidth: 780, minHeight: 560, idealHeight: 620)
+                .frame(minWidth: 740, idealWidth: 780, minHeight: 720, idealHeight: 840)
         }
+        .defaultSize(width: 780, height: 840)
         .windowResizability(.contentMinSize)
 
         MenuBarExtra {
