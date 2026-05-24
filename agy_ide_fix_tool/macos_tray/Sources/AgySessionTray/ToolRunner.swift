@@ -19,10 +19,21 @@ enum ToolError: LocalizedError {
         case let .nodeNotFound(paths):
             return "找不到 node。已检查：\(paths.joined(separator: ", "))"
         case let .failed(command, code, stderr):
-            return "\(command) 失败，退出码 \(code)：\(stderr)"
+            return "\(command) 失败，退出码 \(code)：\(Self.readableError(from: stderr))"
         case .invalidUTF8:
             return "命令输出不是有效文本"
         }
+    }
+
+    private static func readableError(from stderr: String) -> String {
+        if stderr.localizedCaseInsensitiveContains("database is locked") {
+            return "数据库被占用。请确认 Antigravity 和 Antigravity IDE 已完全退出后再同步。"
+        }
+        let lines = stderr
+            .split(separator: "\n")
+            .map(String.init)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        return lines.prefix(6).joined(separator: "\n")
     }
 }
 

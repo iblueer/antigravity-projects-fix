@@ -12,17 +12,37 @@ function sqliteValue(dbPath, key) {
   if (!fs.existsSync(dbPath)) return null;
   const escapedKey = String(key).replace(/'/g, "''");
   const sql = `select value from ItemTable where key='${escapedKey}';`;
-  return execFileSync('sqlite3', ['-readonly', dbPath, sql], {
+  return execFileSync('sqlite3', ['-readonly', '-cmd', '.timeout 10000', dbPath, sql], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
   }).replace(/\n$/, '');
+}
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function execSqliteWithRetry(dbPath, sql, attempts = 5) {
+  let lastError = null;
+  for (let idx = 0; idx < attempts; idx += 1) {
+    try {
+      execFileSync('sqlite3', ['-cmd', '.timeout 10000', dbPath, sql], { stdio: ['ignore', 'pipe', 'pipe'] });
+      return;
+    } catch (error) {
+      lastError = error;
+      const stderr = error.stderr ? error.stderr.toString('utf8') : '';
+      if (!/database is locked|database table is locked/i.test(stderr + error.message)) throw error;
+      if (idx < attempts - 1) sleepSync(800 * (idx + 1));
+    }
+  }
+  throw lastError;
 }
 
 function writeSqliteValue(dbPath, key, value) {
   const escapedKey = String(key).replace(/'/g, "''");
   const escapedValue = String(value).replace(/'/g, "''");
   const sql = `update ItemTable set value='${escapedValue}' where key='${escapedKey}';`;
-  execFileSync('sqlite3', [dbPath, sql], { stdio: ['ignore', 'pipe', 'pipe'] });
+  execSqliteWithRetry(dbPath, sql);
 }
 
 function backupFile(filePath, label) {
@@ -94,25 +114,29 @@ function syncSidebarWorkspaces(ag, ide, options = {}) {
   if (!options.apply || (!agNeedsWrite && !ideNeedsWrite)) {
     return { ...plan.counts, backups, applied: false };
   }
-  if (agNeedsWrite) {
-    backups.ag = backupFile(ag.stateDbPath, 'sidebar-workspaces-sync');
-    writeSqliteValue(ag.stateDbPath, SIDEBAR_WORKSPACES_KEY, value);
-  }
-  if (ideNeedsWrite) {
-    backups.ide = backupFile(ide.stateDbPath, 'sidebar-workspaces-sync');
-    writeSqliteValue(ide.stateDbPath, SIDEBAR_WORKSPACES_KEY, value);
-  }
-  const after = sidebarWorkspacePlan(ag, ide);
-  if (after.counts.sidebarWorkspacesMissingInAg || after.counts.sidebarWorkspacesMissingInIde) {
+  try {
+    if (agNeedsWrite) {
+      backups.ag = backupFile(ag.stateDbPath, 'sidebar-workspaces-sync');
+      writeSqliteValue(ag.stateDbPath, SIDEBAR_WORKSPACES_KEY, value);
+    }
+    if (ideNeedsWrite) {
+      backups.ide = backupFile(ide.stateDbPath, 'sidebar-workspaces-sync');
+      writeSqliteValue(ide.stateDbPath, SIDEBAR_WORKSPACES_KEY, value);
+    }
+    const after = sidebarWorkspacePlan(ag, ide);
+    if (after.counts.sidebarWorkspacesMissingInAg || after.counts.sidebarWorkspacesMissingInIde) {
+      throw new Error('sidebarWorkspaces validation failed');
+    }
+    return {
+      ...after.counts,
+      backups,
+      applied: true,
+    };
+  } catch (error) {
     if (backups.ag) fs.copyFileSync(backups.ag, ag.stateDbPath);
     if (backups.ide) fs.copyFileSync(backups.ide, ide.stateDbPath);
-    throw new Error('sidebarWorkspaces validation failed; restored backups');
+    throw new Error(`sidebarWorkspaces sync failed; restored backups: ${error.message}`);
   }
-  return {
-    ...after.counts,
-    backups,
-    applied: true,
-  };
 }
 
 module.exports = {
