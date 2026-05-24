@@ -79,6 +79,9 @@ final class StatusViewModel: ObservableObject {
     var skippedStableMetadataCount: Int { syncPlan?.counts.skippedStableMetadataConflicts ?? 0 }
     var equivalentFileDifferenceCount: Int { syncPlan?.counts.equivalentFileDifferences ?? skippedSameSummaryCount + skippedStableMetadataCount }
     var contentConflictCount: Int { syncPlan?.counts.contentConflicts ?? 0 }
+    var workspaceSyncCount: Int {
+        (syncPlan?.counts.sidebarWorkspacesMissingInAg ?? 0) + (syncPlan?.counts.sidebarWorkspacesMissingInIde ?? 0)
+    }
 
     var syncDisabledReason: String? {
         if isBusy { return "正在处理当前任务" }
@@ -317,7 +320,7 @@ struct DashboardView: View {
                         MessagePanel(title: "最近结果", message: message, color: viewModel.persisted.lastSyncStatus == "failed" ? .red : .secondary)
                     }
                 }
-                .padding(20)
+                .padding(16)
             }
 
             ActionBar(showSyncConfirmation: $showSyncConfirmation)
@@ -355,8 +358,8 @@ struct DashboardView: View {
 
             StatusPill(title: viewModel.overallStatus.title, color: viewModel.overallStatus.color)
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 16)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
         .background(.bar)
     }
 }
@@ -483,9 +486,9 @@ struct ProductStatusPanel: View {
                 ("未入历史索引", area?.counts.conversationMissingFromAgyhub ?? 0),
                 ("未入界面索引", area?.counts.agyhubMissingFromState ?? 0),
                 ("界面残留", area?.counts.stateMissingFromAgyhub ?? 0)
-            ])
+            ], columns: 2)
         }
-        .padding(14)
+        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
     }
@@ -513,8 +516,9 @@ struct SyncPlanPanel: View {
                     ("AG 独有 Session", viewModel.syncPlan?.counts.agConversationMissingInIde ?? 0),
                     ("IDE 独有 Session", viewModel.syncPlan?.counts.ideConversationMissingInAg ?? 0),
                     ("AG 独有 summary", viewModel.syncPlan?.counts.agSummaryMissingInIde ?? 0),
-                    ("IDE 独有 summary", viewModel.syncPlan?.counts.ideSummaryMissingInAg ?? 0)
-                ])
+                    ("IDE 独有 summary", viewModel.syncPlan?.counts.ideSummaryMissingInAg ?? 0),
+                    ("项目列表待同步", viewModel.workspaceSyncCount)
+                ], columns: 2)
 
                 Divider()
 
@@ -527,10 +531,10 @@ struct SyncPlanPanel: View {
                     ("无法判断，保留副本", viewModel.pendingForkCount),
                     ("摘要完全相同", viewModel.skippedSameSummaryCount),
                     ("仅元信息不同", viewModel.skippedStableMetadataCount)
-                ])
+                ], columns: 2)
             }
         }
-        .padding(14)
+        .padding(12)
         .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
     }
 
@@ -607,28 +611,61 @@ struct ActionBar: View {
                 NSApp.terminate(nil)
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
         .background(.bar)
     }
 }
 
 struct MetricsGrid: View {
     let rows: [(String, Int)]
+    let columns: Int
+
+    init(rows: [(String, Int)], columns: Int = 1) {
+        self.rows = rows
+        self.columns = max(1, columns)
+    }
 
     var body: some View {
-        Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 7) {
-            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                GridRow {
-                    Text(row.0)
-                        .foregroundStyle(.secondary)
-                    Text("\(row.1)")
-                        .fontWeight(row.1 == 0 ? .regular : .semibold)
-                        .monospacedDigit()
+        if columns == 1 {
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 7) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                    GridRow {
+                        metricLabel(row.0)
+                        metricValue(row.1)
+                    }
                 }
             }
+            .font(.callout)
+        } else {
+            LazyVGrid(
+                columns: Array(repeating: GridItem(.flexible(), spacing: 14), count: columns),
+                alignment: .leading,
+                spacing: 7
+            ) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                    HStack(spacing: 8) {
+                        metricLabel(row.0)
+                        Spacer(minLength: 4)
+                        metricValue(row.1)
+                    }
+                }
+            }
+            .font(.callout)
         }
-        .font(.callout)
+    }
+
+    private func metricLabel(_ text: String) -> some View {
+        Text(text)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+    }
+
+    private func metricValue(_ value: Int) -> some View {
+        Text("\(value)")
+            .fontWeight(value == 0 ? .regular : .semibold)
+            .monospacedDigit()
     }
 }
 
@@ -652,7 +689,7 @@ struct SummaryTile: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
-        .padding(14)
+        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
     }

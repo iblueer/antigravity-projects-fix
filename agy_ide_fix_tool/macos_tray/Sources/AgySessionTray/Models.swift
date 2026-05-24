@@ -55,13 +55,22 @@ struct SyncCounts: Decodable {
     let keepBothConflicts: Int?
     let skippedSameSummaryConflicts: Int?
     let skippedStableMetadataConflicts: Int?
+    let sidebarWorkspacesMissingInAg: Int?
+    let sidebarWorkspacesMissingInIde: Int?
 }
 
 struct SyncResult: Decodable {
     let applied: Bool
     let generatedAt: String
     let directions: [SyncDirectionResult]
+    let workspaces: WorkspaceSyncResult?
     let conflicts: SyncConflictApplyResult?
+}
+
+struct WorkspaceSyncResult: Decodable {
+    let sidebarWorkspacesMissingInAg: Int
+    let sidebarWorkspacesMissingInIde: Int
+    let applied: Bool
 }
 
 struct SyncDirectionResult: Decodable {

@@ -7,6 +7,7 @@ const { encodeBytes, encodeString, parseSummaryEntries } = require('./protobuf')
 const { assertNotRunning } = require('./processes');
 const { mirrorStateFromAgyhub } = require('./state');
 const { analyzeSharedConflicts, applyConflictDecisions, syncLogPath, writeSyncLog } = require('./conflicts');
+const { sidebarWorkspacePlan, syncSidebarWorkspaces } = require('./workspaces');
 
 function listConversations(dir) {
   const out = new Map();
@@ -110,6 +111,7 @@ function buildSyncPlan(flags = {}) {
   const sharedConversationIds = Array.from(agConvs.keys()).filter((id) => ideConvs.has(id));
   const fileShapeConflicts = sharedConversationIds.filter((id) => !sameFileShape(agConvs.get(id), ideConvs.get(id)));
   const conflicts = analyzeSharedConflicts(ag, ide, agConvs, ideConvs, agSummaries, ideSummaries);
+  const workspaces = sidebarWorkspacePlan(ag, ide);
 
   return {
     generatedAt: new Date().toISOString(),
@@ -145,6 +147,7 @@ function buildSyncPlan(flags = {}) {
       keepBothConflicts: conflicts.counts.keepBoth,
       skippedSameSummaryConflicts: conflicts.counts.skippedSameSummary,
       skippedStableMetadataConflicts: conflicts.counts.skippedStableMetadata,
+      ...workspaces.counts,
     },
     samples: {
       agConversationMissingInIde: diffIds(agConvs, ideConvs).slice(0, 10),
@@ -153,6 +156,7 @@ function buildSyncPlan(flags = {}) {
       ideSummaryMissingInAg: diffIds(ideSummaries, agSummaries).slice(0, 10),
       fileShapeConflicts: fileShapeConflicts.slice(0, 10),
       contentConflicts: summarizeConflicts(conflicts).samples,
+      ...workspaces.samples,
     },
   };
 }
@@ -173,8 +177,12 @@ function printSyncPlan(plan) {
   console.log(`  auto replace Antigravity from IDE: ${plan.counts.autoReplaceAgFromIde}`);
   console.log(`  auto replace IDE from Antigravity: ${plan.counts.autoReplaceIdeFromAg}`);
   console.log(`  keep both conflicts: ${plan.counts.keepBothConflicts}`);
+  console.log(`  sidebar workspaces only in Antigravity: ${plan.counts.sidebarWorkspacesMissingInIde}`);
+  console.log(`  sidebar workspaces only in Antigravity IDE: ${plan.counts.sidebarWorkspacesMissingInAg}`);
   for (const [name, values] of Object.entries(plan.samples)) {
-    if (values.length) console.log(`  sample ${name}: ${values.join(', ')}`);
+    if (!values.length) continue;
+    const text = values.map((item) => (typeof item === 'string' ? item : `${item.cid}:${item.action}`)).join(', ');
+    console.log(`  sample ${name}: ${text}`);
   }
 }
 
@@ -370,6 +378,10 @@ function applyBidirectionalSync(flags = {}) {
   const first = applyOneWaySync(firstPlan, flags);
   const secondPlan = buildOneWaySyncPlan({ ...flags, from: 'ide', to: 'ag' });
   const second = applyOneWaySync(secondPlan, flags);
+  const ag = areaConfig('ag', flags);
+  const ide = areaConfig('ide', flags);
+  const workspaces = syncSidebarWorkspaces(ag, ide, { apply: true });
+  writeSyncLog({ kind: 'sidebar-workspaces-sync', result: workspaces });
   const conflicts = applySharedConflictResolution(flags);
   return {
     generatedAt: new Date().toISOString(),
@@ -378,6 +390,7 @@ function applyBidirectionalSync(flags = {}) {
       { plan: oneWayPlanSummary(firstPlan), result: first },
       { plan: oneWayPlanSummary(secondPlan), result: second },
     ],
+    workspaces,
     conflicts,
   };
 }
@@ -426,6 +439,7 @@ function runSync(args = [], flags = {}) {
           oneWayPlanSummary(buildOneWaySyncPlan({ ...flags, from: 'ag', to: 'ide' })),
           oneWayPlanSummary(buildOneWaySyncPlan({ ...flags, from: 'ide', to: 'ag' })),
         ],
+        workspaces: sidebarWorkspacePlan(areaConfig('ag', flags), areaConfig('ide', flags)).counts,
         conflicts: buildConflictPlan(flags),
       };
       if (!flags.apply) {
