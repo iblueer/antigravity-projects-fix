@@ -72,7 +72,13 @@ struct SyncResult: Decodable {
     let generatedAt: String
     let directions: [SyncDirectionResult]
     let workspaces: WorkspaceSyncResult?
+    let projectRepairs: ProjectRepairPair?
     let conflicts: SyncConflictApplyResult?
+}
+
+struct ProjectRepairPair: Decodable {
+    let ag: ProjectRepairResult
+    let ide: ProjectRepairResult
 }
 
 struct WorkspaceSyncResult: Decodable {
@@ -154,6 +160,16 @@ struct ProjectRepairResult: Decodable {
     let projectFilesRepaired: Int
     let workspaceStorageCopied: Int
     let summariesUpdated: Int
+    let items: [ProjectRepairItem]?
+}
+
+struct ProjectRepairItem: Decodable {
+    let cid: String
+    let title: String?
+    let workspaceUri: String?
+    let projectMissing: Bool?
+    let projectJsonNeedsRepair: Bool?
+    let workspaceStorageNeedsCopy: Bool?
 }
 
 struct PersistedState: Codable {

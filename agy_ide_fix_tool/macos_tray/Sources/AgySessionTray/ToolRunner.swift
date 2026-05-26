@@ -76,6 +76,11 @@ struct ToolRunner {
         return try JSONDecoder().decode(ProjectRepairResult.self, from: output.stdout)
     }
 
+    func projectRepairPlan(area: String) async throws -> ProjectRepairResult {
+        let output = try await run(arguments: ["repair", "projects", "--area", area, "--json"])
+        return try JSONDecoder().decode(ProjectRepairResult.self, from: output.stdout)
+    }
+
     private func run(arguments: [String], allowedExitCodes: Set<Int32> = [0]) async throws -> ToolOutput {
         try await withCheckedThrowingContinuation { continuation in
             let process = Process()

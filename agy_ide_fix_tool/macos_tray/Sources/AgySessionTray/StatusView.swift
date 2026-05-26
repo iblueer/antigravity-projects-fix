@@ -40,6 +40,8 @@ enum OverallStatus {
 final class StatusViewModel: ObservableObject {
     @Published var doctor: DoctorReport?
     @Published var syncPlan: SyncPlan?
+    @Published var agProjectPlan: ProjectRepairResult?
+    @Published var ideProjectPlan: ProjectRepairResult?
     @Published var persisted: PersistedState
     @Published var isBusy = false
     @Published var errorMessage: String?
@@ -57,6 +59,7 @@ final class StatusViewModel: ObservableObject {
         if errorMessage != nil { return .error }
         guard let doctor else { return .loading }
         if !doctor.areas.allSatisfy(\.healthy) { return .warning }
+        if attributionIssueCount > 0 { return .warning }
         if pendingOverwriteCount > 0 || pendingForkCount > 0 { return .warning }
         return .healthy
     }
@@ -81,6 +84,18 @@ final class StatusViewModel: ObservableObject {
     var contentConflictCount: Int { syncPlan?.counts.contentConflicts ?? 0 }
     var workspaceSyncCount: Int {
         (syncPlan?.counts.sidebarWorkspacesMissingInAg ?? 0) + (syncPlan?.counts.sidebarWorkspacesMissingInIde ?? 0)
+    }
+    var agProjectMissingCount: Int { agProjectPlan?.items?.filter { $0.projectMissing == true }.count ?? 0 }
+    var ideProjectMissingCount: Int { ideProjectPlan?.items?.filter { $0.projectMissing == true }.count ?? 0 }
+    var agProjectFileRepairCount: Int { agProjectPlan?.items?.filter { $0.projectJsonNeedsRepair == true }.count ?? 0 }
+    var ideProjectFileRepairCount: Int { ideProjectPlan?.items?.filter { $0.projectJsonNeedsRepair == true }.count ?? 0 }
+    var agWorkspaceStorageRepairCount: Int { agProjectPlan?.items?.filter { $0.workspaceStorageNeedsCopy == true }.count ?? 0 }
+    var ideWorkspaceStorageRepairCount: Int { ideProjectPlan?.items?.filter { $0.workspaceStorageNeedsCopy == true }.count ?? 0 }
+    var attributionIssueCount: Int {
+        agProjectMissingCount + ideProjectMissingCount +
+            agProjectFileRepairCount + ideProjectFileRepairCount +
+            agWorkspaceStorageRepairCount + ideWorkspaceStorageRepairCount +
+            workspaceSyncCount
     }
     var hasStateReadError: Bool {
         doctor?.areas.contains { area in
@@ -109,6 +124,7 @@ final class StatusViewModel: ObservableObject {
     }
 
     var canRepair: Bool { repairDisabledReason == nil }
+    var canRepairAttribution: Bool { repairDisabledReason == nil }
 
     var lastSyncText: String {
         guard let last = persisted.lastSyncAt else { return "无记录" }
@@ -151,14 +167,22 @@ final class StatusViewModel: ObservableObject {
             guard let runner else {
                 throw NSError(domain: "AgySessionTray", code: 2, userInfo: [NSLocalizedDescriptionKey: "找不到 agy_ide_fix_tool/src/cli.js"])
             }
-            async let doctorReport = runner.doctor()
-            async let planReport = runner.syncPlan()
-            doctor = try await doctorReport
-            syncPlan = try await planReport
+            try await loadReports(runner: runner)
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func loadReports(runner: ToolRunner) async throws {
+        async let doctorReport = runner.doctor()
+        async let planReport = runner.syncPlan()
+        async let agProjectReport = runner.projectRepairPlan(area: "ag")
+        async let ideProjectReport = runner.projectRepairPlan(area: "ide")
+        doctor = try await doctorReport
+        syncPlan = try await planReport
+        agProjectPlan = try await agProjectReport
+        ideProjectPlan = try await ideProjectReport
     }
 
     func syncNow() async {
@@ -175,12 +199,13 @@ final class StatusViewModel: ObservableObject {
             }
 
             let result = try await runner.bidirectionalSync()
-            doctor = try await runner.doctor()
-            syncPlan = try await runner.syncPlan()
+            try await loadReports(runner: runner)
             persisted.lastSyncAt = Date()
             persisted.lastSyncStatus = "success"
             if let conflicts = result.conflicts {
-                persisted.lastSyncMessage = "同步完成；覆盖 \(conflicts.counts.autoReplaceAgFromIde + conflicts.counts.autoReplaceIdeFromAg)，保留两份 \(conflicts.counts.keepBoth)"
+                let attribution = result.projectRepairs.map { repairAttributionMessage(prefix: nil, agProject: $0.ag, ideProject: $0.ide) }
+                let base = "同步完成；覆盖 \(conflicts.counts.autoReplaceAgFromIde + conflicts.counts.autoReplaceIdeFromAg)，保留两份 \(conflicts.counts.keepBoth)"
+                persisted.lastSyncMessage = [base, attribution].compactMap { $0 }.joined(separator: "；")
             } else {
                 persisted.lastSyncMessage = "同步完成"
             }
@@ -214,19 +239,14 @@ final class StatusViewModel: ObservableObject {
             let ideRepair = try await runner.repairState(area: "ide")
             let agSummaryRepair = try await runner.repairMissingSummaries(area: "ag")
             let ideSummaryRepair = try await runner.repairMissingSummaries(area: "ide")
-            let agProjectRepair = try await runner.repairProjects(area: "ag")
-            let ideProjectRepair = try await runner.repairProjects(area: "ide")
-            doctor = try await runner.doctor()
-            syncPlan = try await runner.syncPlan()
+            try await loadReports(runner: runner)
             persisted.lastSyncAt = Date()
             persisted.lastSyncStatus = "success"
             persisted.lastSyncMessage = repairMessage(
                 ag: agRepair,
                 ide: ideRepair,
                 agSummary: agSummaryRepair,
-                ideSummary: ideSummaryRepair,
-                agProject: agProjectRepair,
-                ideProject: ideProjectRepair
+                ideSummary: ideSummaryRepair
             )
             store.save(persisted)
             errorMessage = nil
@@ -238,6 +258,38 @@ final class StatusViewModel: ObservableObject {
             store.save(persisted)
             errorMessage = error.localizedDescription
             notify(title: "修复失败", body: error.localizedDescription)
+        }
+    }
+
+    func repairAttribution() async {
+        guard !isBusy else { return }
+        isBusy = true
+        defer { isBusy = false }
+        do {
+            guard let runner else {
+                throw NSError(domain: "AgySessionTray", code: 2, userInfo: [NSLocalizedDescriptionKey: "找不到 agy_ide_fix_tool/src/cli.js"])
+            }
+            let closed = await AppCloser.closeAndWait()
+            guard closed else {
+                throw NSError(domain: "AgySessionTray", code: 1, userInfo: [NSLocalizedDescriptionKey: "Antigravity 或 Antigravity IDE 未能在 20 秒内退出，归属修复已取消。"])
+            }
+
+            let agProjectRepair = try await runner.repairProjects(area: "ag")
+            let ideProjectRepair = try await runner.repairProjects(area: "ide")
+            try await loadReports(runner: runner)
+            persisted.lastSyncAt = Date()
+            persisted.lastSyncStatus = "success"
+            persisted.lastSyncMessage = repairAttributionMessage(prefix: "归属修复完成", agProject: agProjectRepair, ideProject: ideProjectRepair)
+            store.save(persisted)
+            errorMessage = nil
+            notifyIfUnhealthy()
+        } catch {
+            persisted.lastSyncAt = Date()
+            persisted.lastSyncStatus = "failed"
+            persisted.lastSyncMessage = error.localizedDescription
+            store.save(persisted)
+            errorMessage = error.localizedDescription
+            notify(title: "归属修复失败", body: error.localizedDescription)
         }
     }
 
@@ -289,21 +341,15 @@ final class StatusViewModel: ObservableObject {
         ag: RepairResult,
         ide: RepairResult,
         agSummary: SummaryRepairResult,
-        ideSummary: SummaryRepairResult,
-        agProject: ProjectRepairResult,
-        ideProject: ProjectRepairResult
+        ideSummary: SummaryRepairResult
     ) -> String {
         let fixed = ag.missingCount + ag.staleCount + ide.missingCount + ide.staleCount
         let summaries = agSummary.repairedCount + ideSummary.repairedCount
-        let projectSummaries = agProject.summariesUpdated + ideProject.summariesUpdated
-        let projectsCreated = agProject.projectsCreated + ideProject.projectsCreated
-        let projectFiles = agProject.projectFilesRepaired + ideProject.projectFilesRepaired
-        let workspaceStorage = agProject.workspaceStorageCopied + ideProject.workspaceStorageCopied
         let skipped = agSummary.skippedCount + ideSummary.skippedCount
         let remaining = doctor?.areas.reduce(0) { total, area in
             total + area.counts.conversationMissingFromAgyhub + area.counts.agyhubMissingFromState + area.counts.stateMissingFromAgyhub
         } ?? 0
-        let handled = fixed + summaries + projectSummaries + projectsCreated + projectFiles + workspaceStorage
+        let handled = fixed + summaries
         if handled == 0 {
             if skipped > 0 { return "索引检查完成；\(skipped) 条缺失 summary 缺少可用 brain 信息，未写入" }
             return remaining == 0 ? "索引检查完成，未发现需要修复的项目" : "索引检查完成；仍有 \(remaining) 个问题需要其他处理"
@@ -311,12 +357,25 @@ final class StatusViewModel: ObservableObject {
         var parts = ["索引修复完成"]
         if fixed > 0 { parts.append("界面索引 \(fixed) 项") }
         if summaries > 0 { parts.append("历史 summary \(summaries) 条") }
+        if skipped > 0 { parts.append("跳过 \(skipped) 条") }
+        if remaining > 0 { parts.append("仍有 \(remaining) 个问题") }
+        return parts.joined(separator: "，")
+    }
+
+    private func repairAttributionMessage(prefix: String?, agProject: ProjectRepairResult, ideProject: ProjectRepairResult) -> String {
+        let projectSummaries = agProject.summariesUpdated + ideProject.summariesUpdated
+        let projectsCreated = agProject.projectsCreated + ideProject.projectsCreated
+        let projectFiles = agProject.projectFilesRepaired + ideProject.projectFilesRepaired
+        let workspaceStorage = agProject.workspaceStorageCopied + ideProject.workspaceStorageCopied
+        let handled = projectSummaries + projectsCreated + projectFiles + workspaceStorage
+        if handled == 0 {
+            return prefix == nil ? "归属无须修复" : "归属检查完成，未发现需要修复的项目"
+        }
+        var parts = [prefix ?? "归属适配"]
         if projectSummaries > 0 { parts.append("项目归属 \(projectSummaries) 条") }
         if projectsCreated > 0 { parts.append("新建项目 \(projectsCreated) 个") }
         if projectFiles > 0 { parts.append("项目文件 \(projectFiles) 个") }
         if workspaceStorage > 0 { parts.append("工作区状态 \(workspaceStorage) 个") }
-        if skipped > 0 { parts.append("跳过 \(skipped) 条") }
-        if remaining > 0 { parts.append("仍有 \(remaining) 个问题") }
         return parts.joined(separator: "，")
     }
 }
@@ -337,6 +396,8 @@ struct DashboardView: View {
                         ProductStatusPanel(title: "Antigravity", area: viewModel.agArea)
                         ProductStatusPanel(title: "Antigravity IDE", area: viewModel.ideArea)
                     }
+
+                    SessionAttributionPanel()
 
                     SyncPlanPanel()
 
@@ -439,6 +500,13 @@ struct MenuStatusView: View {
                 }
                 .disabled(!viewModel.canRepair)
 
+                Button {
+                    Task { await viewModel.repairAttribution() }
+                } label: {
+                    Label("修复归属", systemImage: "folder.badge.gearshape")
+                }
+                .disabled(!viewModel.canRepairAttribution)
+
                 Spacer()
 
                 Button {
@@ -482,14 +550,16 @@ struct OverviewStrip: View {
             SummaryTile(title: "Antigravity", value: "\(viewModel.agSessionCount)", detail: "sessions", color: .primary)
             SummaryTile(title: "Antigravity IDE", value: "\(viewModel.ideSessionCount)", detail: "sessions", color: .primary)
             SummaryTile(title: "索引健康", value: healthValue, detail: "products", color: healthColor)
-            SummaryTile(title: "待处理", value: "\(viewModel.pendingOverwriteCount + viewModel.pendingForkCount)", detail: "覆盖 \(viewModel.pendingOverwriteCount) / 分叉 \(viewModel.pendingForkCount)", color: pendingColor)
+            SummaryTile(title: "待处理", value: "\(pendingTotal)", detail: "同步 \(syncIssueCount) / 归属 \(viewModel.attributionIssueCount)", color: pendingColor)
         }
     }
 
     private var healthyCount: Int { viewModel.doctor?.areas.filter(\.healthy).count ?? 0 }
     private var healthValue: String { "\(healthyCount)/\(viewModel.doctor?.areas.count ?? 2)" }
     private var healthColor: Color { healthyCount == (viewModel.doctor?.areas.count ?? 2) ? .green : .orange }
-    private var pendingColor: Color { viewModel.pendingOverwriteCount + viewModel.pendingForkCount == 0 ? .green : .orange }
+    private var syncIssueCount: Int { viewModel.pendingOverwriteCount + viewModel.pendingForkCount }
+    private var pendingTotal: Int { syncIssueCount + viewModel.attributionIssueCount }
+    private var pendingColor: Color { pendingTotal == 0 ? .green : .orange }
 }
 
 struct ProductStatusPanel: View {
@@ -517,6 +587,77 @@ struct ProductStatusPanel: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+struct SessionAttributionPanel: View {
+    @EnvironmentObject private var viewModel: StatusViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Session 归属")
+                        .font(.headline)
+                    Text("修复掉出 Project、无效 Project、缺工作区状态的问题")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                StatusPill(title: statusTitle, color: statusColor)
+            }
+
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Antigravity")
+                        .font(.subheadline.weight(.semibold))
+                    MetricsGrid(rows: [
+                        ("缺 Project", viewModel.agProjectMissingCount),
+                        ("项目文件待修", viewModel.agProjectFileRepairCount),
+                        ("工作区状态待补", viewModel.agWorkspaceStorageRepairCount)
+                    ], columns: 1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Antigravity IDE")
+                        .font(.subheadline.weight(.semibold))
+                    MetricsGrid(rows: [
+                        ("缺 Project", viewModel.ideProjectMissingCount),
+                        ("项目文件待修", viewModel.ideProjectFileRepairCount),
+                        ("工作区状态待补", viewModel.ideWorkspaceStorageRepairCount)
+                    ], columns: 1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("侧边栏")
+                        .font(.subheadline.weight(.semibold))
+                    MetricsGrid(rows: [
+                        ("AG 待补", viewModel.syncPlan?.counts.sidebarWorkspacesMissingInAg ?? 0),
+                        ("IDE 待补", viewModel.syncPlan?.counts.sidebarWorkspacesMissingInIde ?? 0),
+                        ("合计", viewModel.workspaceSyncCount)
+                    ], columns: 1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var statusTitle: String {
+        if viewModel.agProjectPlan == nil || viewModel.ideProjectPlan == nil { return "读取中" }
+        return viewModel.attributionIssueCount == 0 ? "健康" : "需修复"
+    }
+
+    private var statusColor: Color {
+        if viewModel.agProjectPlan == nil || viewModel.ideProjectPlan == nil { return .blue }
+        return viewModel.attributionIssueCount == 0 ? .green : .orange
     }
 }
 
@@ -614,6 +755,13 @@ struct ActionBar: View {
                 Label("修复 Session", systemImage: "wrench.and.screwdriver")
             }
             .disabled(!viewModel.canRepair)
+
+            Button {
+                Task { await viewModel.repairAttribution() }
+            } label: {
+                Label("修复归属", systemImage: "folder.badge.gearshape")
+            }
+            .disabled(!viewModel.canRepairAttribution)
 
             Spacer()
 
