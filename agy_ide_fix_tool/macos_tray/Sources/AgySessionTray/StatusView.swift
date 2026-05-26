@@ -214,6 +214,8 @@ final class StatusViewModel: ObservableObject {
             let ideRepair = try await runner.repairState(area: "ide")
             let agSummaryRepair = try await runner.repairMissingSummaries(area: "ag")
             let ideSummaryRepair = try await runner.repairMissingSummaries(area: "ide")
+            let agProjectRepair = try await runner.repairProjects(area: "ag")
+            let ideProjectRepair = try await runner.repairProjects(area: "ide")
             doctor = try await runner.doctor()
             syncPlan = try await runner.syncPlan()
             persisted.lastSyncAt = Date()
@@ -222,7 +224,9 @@ final class StatusViewModel: ObservableObject {
                 ag: agRepair,
                 ide: ideRepair,
                 agSummary: agSummaryRepair,
-                ideSummary: ideSummaryRepair
+                ideSummary: ideSummaryRepair,
+                agProject: agProjectRepair,
+                ideProject: ideProjectRepair
             )
             store.save(persisted)
             errorMessage = nil
@@ -281,14 +285,25 @@ final class StatusViewModel: ObservableObject {
         UNUserNotificationCenter.current().add(request)
     }
 
-    private func repairMessage(ag: RepairResult, ide: RepairResult, agSummary: SummaryRepairResult, ideSummary: SummaryRepairResult) -> String {
+    private func repairMessage(
+        ag: RepairResult,
+        ide: RepairResult,
+        agSummary: SummaryRepairResult,
+        ideSummary: SummaryRepairResult,
+        agProject: ProjectRepairResult,
+        ideProject: ProjectRepairResult
+    ) -> String {
         let fixed = ag.missingCount + ag.staleCount + ide.missingCount + ide.staleCount
         let summaries = agSummary.repairedCount + ideSummary.repairedCount
+        let projectSummaries = agProject.summariesUpdated + ideProject.summariesUpdated
+        let projectsCreated = agProject.projectsCreated + ideProject.projectsCreated
+        let projectFiles = agProject.projectFilesRepaired + ideProject.projectFilesRepaired
+        let workspaceStorage = agProject.workspaceStorageCopied + ideProject.workspaceStorageCopied
         let skipped = agSummary.skippedCount + ideSummary.skippedCount
         let remaining = doctor?.areas.reduce(0) { total, area in
             total + area.counts.conversationMissingFromAgyhub + area.counts.agyhubMissingFromState + area.counts.stateMissingFromAgyhub
         } ?? 0
-        let handled = fixed + summaries
+        let handled = fixed + summaries + projectSummaries + projectsCreated + projectFiles + workspaceStorage
         if handled == 0 {
             if skipped > 0 { return "索引检查完成；\(skipped) 条缺失 summary 缺少可用 brain 信息，未写入" }
             return remaining == 0 ? "索引检查完成，未发现需要修复的项目" : "索引检查完成；仍有 \(remaining) 个问题需要其他处理"
@@ -296,6 +311,10 @@ final class StatusViewModel: ObservableObject {
         var parts = ["索引修复完成"]
         if fixed > 0 { parts.append("界面索引 \(fixed) 项") }
         if summaries > 0 { parts.append("历史 summary \(summaries) 条") }
+        if projectSummaries > 0 { parts.append("项目归属 \(projectSummaries) 条") }
+        if projectsCreated > 0 { parts.append("新建项目 \(projectsCreated) 个") }
+        if projectFiles > 0 { parts.append("项目文件 \(projectFiles) 个") }
+        if workspaceStorage > 0 { parts.append("工作区状态 \(workspaceStorage) 个") }
         if skipped > 0 { parts.append("跳过 \(skipped) 条") }
         if remaining > 0 { parts.append("仍有 \(remaining) 个问题") }
         return parts.joined(separator: "，")

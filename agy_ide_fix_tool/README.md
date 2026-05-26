@@ -2,6 +2,8 @@
 
 本目录是新的 Antigravity 会话管理工具原型。
 
+技术细节见 [TECHNICAL.md](TECHNICAL.md)。
+
 当前能力：
 
 - `doctor`：只读检查 `Antigravity` / `Antigravity IDE` 的会话、agyhub summary、state summary 和项目重复情况。

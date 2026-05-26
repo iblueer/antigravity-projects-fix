@@ -7,6 +7,7 @@ const { areaConfig } = require('./areas');
 const { parseSummaryEntries } = require('./protobuf');
 const { mirrorStateFromAgyhub } = require('./state');
 const { applyMissingSummaryRepair } = require('./summary_repair');
+const { applyProjectRepair } = require('./project_repair');
 
 function readAgyhubSummaries(filePath) {
   return parseSummaryEntries(fs.readFileSync(filePath));
@@ -77,6 +78,34 @@ function runRepair(args = [], flags = {}) {
     } else {
       console.log('  applied: no');
       console.log('  add --apply to append repairable summaries and update state.vscdb');
+    }
+    return 0;
+  }
+  if (target === 'projects') {
+    const result = applyProjectRepair(flags);
+    if (flags.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return 0;
+    }
+    console.log(`${result.area.label} project repair`);
+    console.log(`  summaries missing project: ${result.missingProjectCount}`);
+    console.log(`  projects to create: ${result.items.filter((item) => item.willCreateProject).length}`);
+    console.log(`  project files to repair: ${result.items.filter((item) => item.projectJsonNeedsRepair).length}`);
+    console.log(`  workspace storage to copy: ${result.items.filter((item) => item.workspaceStorageNeedsCopy).length}`);
+    for (const item of result.items.slice(0, 10)) {
+      console.log(`  ${item.cid}: ${item.currentProject || '(none)'} -> ${item.targetProjectName}`);
+    }
+    if (result.applied) {
+      console.log('  applied: yes');
+      console.log(`  projects created: ${result.projectsCreated}`);
+      console.log(`  project files repaired: ${result.projectFilesRepaired}`);
+      console.log(`  workspace storage copied: ${result.workspaceStorageCopied}`);
+      console.log(`  summaries updated: ${result.summariesUpdated}`);
+      console.log(`  agyhub backup: ${result.backups.agyhub}`);
+      console.log(`  state backup: ${result.backups.state}`);
+    } else {
+      console.log('  applied: no');
+      console.log('  add --apply to create missing projects and update summary project links');
     }
     return 0;
   }

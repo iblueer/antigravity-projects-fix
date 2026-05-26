@@ -146,6 +146,16 @@ struct SummaryRepairItem: Decodable {
     let project: String?
 }
 
+struct ProjectRepairResult: Decodable {
+    let area: AreaIdentity
+    let applied: Bool
+    let missingProjectCount: Int
+    let projectsCreated: Int
+    let projectFilesRepaired: Int
+    let workspaceStorageCopied: Int
+    let summariesUpdated: Int
+}
+
 struct PersistedState: Codable {
     var lastSyncAt: Date?
     var lastSyncStatus: String?

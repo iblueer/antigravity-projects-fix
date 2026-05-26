@@ -33,6 +33,7 @@ Usage:
   agyfix-session doctor --all --json
   agyfix-session repair state --area ide --mirror-agyhub [--apply]
   agyfix-session repair summary --area ide [--id <conversation-id>] [--apply]
+  agyfix-session repair projects --area ag [--apply]
   agyfix-session sync plan
   agyfix-session sync plan --json
   agyfix-session sync conflicts [--json]

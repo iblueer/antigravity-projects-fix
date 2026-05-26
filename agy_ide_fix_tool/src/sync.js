@@ -8,6 +8,7 @@ const { assertNotRunning } = require('./processes');
 const { mirrorStateFromAgyhub } = require('./state');
 const { analyzeSharedConflicts, applyConflictDecisions, syncLogPath, writeSyncLog } = require('./conflicts');
 const { sidebarWorkspacePlan, syncSidebarWorkspaces } = require('./workspaces');
+const { applyProjectRepair } = require('./project_repair');
 
 function listConversations(dir) {
   const out = new Map();
@@ -385,6 +386,11 @@ function applyBidirectionalSync(flags = {}) {
   const ide = areaConfig('ide', flags);
   const workspaces = syncSidebarWorkspaces(ag, ide, { apply: true });
   writeSyncLog({ kind: 'sidebar-workspaces-sync', result: workspaces });
+  const projectRepairs = {
+    ag: applyProjectRepair({ ...flags, area: 'ag', apply: true }),
+    ide: applyProjectRepair({ ...flags, area: 'ide', apply: true }),
+  };
+  writeSyncLog({ kind: 'project-repair-sync', result: projectRepairs });
   const conflicts = applySharedConflictResolution(flags);
   return {
     generatedAt: new Date().toISOString(),
@@ -394,6 +400,7 @@ function applyBidirectionalSync(flags = {}) {
       { plan: oneWayPlanSummary(secondPlan), result: second },
     ],
     workspaces,
+    projectRepairs,
     conflicts,
   };
 }
