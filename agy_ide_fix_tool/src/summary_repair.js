@@ -8,6 +8,9 @@ const { encodeBytes, encodeString, encodeVarint, parseSummaryEntries } = require
 const { mirrorStateFromAgyhub } = require('./state');
 
 const URI_RE = /file:\/\/\/[^\s)\]]+/g;
+const ABS_PATH_RE = /\/Users\/[^\s)\]<>"]+/g;
+const ACTIVE_DOCUMENT_RE = /Active Document:\s*([^\s]+)(?:\s+\(|\s*$)/;
+const USER_REQUEST_RE = /<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/;
 
 function encodeKey(field, wire) {
   return encodeVarint(field * 8 + wire);
@@ -55,6 +58,44 @@ function normalizeUri(uri) {
   }
 }
 
+function fileUriFromPath(filePath) {
+  if (!filePath || !filePath.startsWith('/')) return null;
+  return `file://${filePath.split('/').map((part, idx) => (idx === 0 ? '' : encodeURIComponent(part))).join('/')}`;
+}
+
+function pathFromUri(uri) {
+  const normalized = normalizeUri(uri);
+  if (normalized.startsWith('file://')) return normalized.replace(/^file:\/\//, '');
+  return normalized;
+}
+
+function workspaceRootFromPath(filePath) {
+  if (!filePath || !filePath.startsWith('/')) return null;
+  let cursor = filePath;
+  if (/\.[A-Za-z0-9]+$/.test(cursor)) cursor = path.dirname(cursor);
+  const original = cursor;
+  for (let i = 0; i < 8 && cursor !== path.dirname(cursor); i += 1) {
+    if (fs.existsSync(path.join(cursor, '.git'))) return cursor;
+    cursor = path.dirname(cursor);
+  }
+  const githubIdx = original.indexOf('/GitHub/');
+  if (githubIdx >= 0) {
+    const parts = original.slice(githubIdx + '/GitHub/'.length).split('/').filter(Boolean);
+    if (parts[0]) return original.slice(0, githubIdx + '/GitHub/'.length) + parts[0];
+  }
+  return original;
+}
+
+function cleanTitle(text) {
+  if (!text) return null;
+  return text
+    .replace(/\s+/g, ' ')
+    .replace(/^#+\s*/, '')
+    .replace(/^(帮我|请|麻烦|能不能|可以)?\s*/, '')
+    .trim()
+    .slice(0, 80) || null;
+}
+
 function markdownTitle(filePath) {
   if (!fs.existsSync(filePath)) return null;
   const text = fs.readFileSync(filePath, 'utf8');
@@ -88,14 +129,11 @@ function urisFromBrain(brainDir) {
 function projectRootFromUris(uris) {
   const counts = new Map();
   for (const uri of uris) {
-    const marker = '/frontend/';
-    let root = uri;
-    const idx = root.indexOf(marker);
-    if (idx >= 0) root = root.slice(0, idx);
-    root = root.replace(/\/[^/]+\.(vue|ts|js|json|css|md|go|swift|tsx|jsx)$/i, '');
+    let root = workspaceRootFromPath(pathFromUri(uri));
     counts.set(root, (counts.get(root) || 0) + 1);
   }
-  return Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+  const root = Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+  return root ? fileUriFromPath(root) || root : null;
 }
 
 function findProjectForUri(projectsDir, workspaceUri) {
@@ -114,6 +152,158 @@ function findProjectForUri(projectsDir, workspaceUri) {
     }
   }
   return 'outside-of-project';
+}
+
+function registeredProjectRoots(projectsDir) {
+  const roots = [];
+  if (!projectsDir || !fs.existsSync(projectsDir)) return roots;
+  for (const file of fs.readdirSync(projectsDir)) {
+    if (!file.endsWith('.json')) continue;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(projectsDir, file), 'utf8'));
+      const resources = parsed.projectResources?.resources || [];
+      for (const resource of resources) {
+        const folderUri = normalizeUri(resource.gitFolder?.folderUri || '');
+        if (folderUri) roots.push({ uri: folderUri, id: parsed.id });
+      }
+    } catch (_) {
+      /* skip broken project files */
+    }
+  }
+  return roots.sort((a, b) => b.uri.length - a.uri.length);
+}
+
+function preferredWorkspaceUri(projectsDir, primaryUris, fallbackUris) {
+  for (const uri of primaryUris) {
+    const root = workspaceRootFromPath(pathFromUri(uri));
+    if (root) return fileUriFromPath(root);
+  }
+  const roots = registeredProjectRoots(projectsDir);
+  for (const uri of fallbackUris) {
+    const normalized = normalizeUri(uri);
+    const hit = roots.find((root) => normalized.startsWith(root.uri));
+    if (hit) return hit.uri;
+  }
+  return projectRootFromUris(fallbackUris);
+}
+
+function readJsonl(filePath) {
+  if (!fs.existsSync(filePath)) return [];
+  const out = [];
+  for (const line of fs.readFileSync(filePath, 'utf8').split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      out.push(JSON.parse(line));
+    } catch (_) {
+      /* skip malformed transcript lines */
+    }
+  }
+  return out;
+}
+
+function titleFromConversationHistory(content) {
+  const match = content.match(/^## Conversation [^:]+:\s*(.+)$/m);
+  return cleanTitle(match?.[1]);
+}
+
+function titleFromUserRequest(content) {
+  const match = content.match(USER_REQUEST_RE);
+  if (!match) return null;
+  return cleanTitle(match[1]);
+}
+
+function pathsFromTranscriptContent(content) {
+  const paths = [];
+  const active = content.match(ACTIVE_DOCUMENT_RE)?.[1];
+  if (active) paths.push(active);
+  for (const match of content.matchAll(ABS_PATH_RE)) {
+    paths.push(match[0]);
+  }
+  return paths.filter((item) => item.startsWith('/Users/'));
+}
+
+function transcriptInfo(brainDir) {
+  const transcriptPath = path.join(brainDir, '.system_generated', 'logs', 'transcript.jsonl');
+  const lines = readJsonl(transcriptPath);
+  const uris = [];
+  const primaryUris = [];
+  let title = null;
+  let titleSource = null;
+  for (const entry of lines) {
+    const content = typeof entry.content === 'string' ? entry.content : '';
+    if (!content) continue;
+    if (!title && entry.type === 'CONVERSATION_HISTORY') {
+      title = titleFromConversationHistory(content);
+      if (title) titleSource = 'transcript conversation history';
+    }
+    if (!title && entry.type === 'USER_INPUT') {
+      title = titleFromUserRequest(content);
+      if (title) titleSource = 'transcript user request';
+    }
+    for (const match of content.matchAll(URI_RE)) uris.push(normalizeUri(match[0]));
+    const active = content.match(ACTIVE_DOCUMENT_RE)?.[1];
+    if (active) {
+      const uri = fileUriFromPath(active);
+      if (uri) primaryUris.push(normalizeUri(uri));
+    }
+    for (const filePath of pathsFromTranscriptContent(content)) {
+      const uri = fileUriFromPath(filePath);
+      if (uri) uris.push(normalizeUri(uri));
+    }
+  }
+  return {
+    title,
+    titleSource,
+    uris: Array.from(new Set(uris)),
+    primaryUris: Array.from(new Set(primaryUris)),
+    stepCount: lines.length || null,
+    transcriptPath: fs.existsSync(transcriptPath) ? transcriptPath : null,
+  };
+}
+
+function sourceQuality({ title, workspaceUri, transcript }) {
+  if (title && workspaceUri && transcript?.titleSource === 'transcript conversation history') return 'high';
+  if (title && workspaceUri) return 'medium';
+  return 'low';
+}
+
+function planMissingItem(area, cid, conversations) {
+  const conversation = conversations.get(cid);
+  const brainDir = path.join(area.geminiDir, 'brain', cid);
+  const brainTitle = titleFromBrain(brainDir);
+  const brainUris = urisFromBrain(brainDir);
+  const transcript = transcriptInfo(brainDir);
+  const title = brainTitle || transcript.title;
+  const workspaceUri = preferredWorkspaceUri(area.projectsDir, brainUris.concat(transcript.primaryUris), brainUris.concat(transcript.uris));
+  const project = findProjectForUri(area.projectsDir, workspaceUri);
+  const reasons = [];
+  if (!conversation) reasons.push('conversation file not found');
+  if (!fs.existsSync(brainDir)) reasons.push('brain directory not found');
+  if (!title) reasons.push('cannot infer title from brain markdown or transcript');
+  if (!workspaceUri) reasons.push('cannot infer workspace URI from brain markdown or transcript');
+  const strategy = [
+    brainTitle || brainUris.length ? 'brain-markdown' : null,
+    transcript.transcriptPath ? 'transcript-jsonl' : null,
+    conversation ? 'conversation-file-metadata' : null,
+  ].filter(Boolean).join('+') || 'none';
+  return {
+    cid,
+    canRepair: reasons.length === 0,
+    reasons,
+    title,
+    workspaceUri,
+    project,
+    repairStrategy: strategy,
+    confidence: sourceQuality({ title, workspaceUri, transcript }),
+    evidence: {
+      titleSource: brainTitle ? 'brain markdown' : transcript.titleSource,
+      workspaceUriSource: brainUris.length ? 'brain markdown' : (transcript.uris.length ? 'transcript' : null),
+      transcriptPath: transcript.transcriptPath,
+    },
+    file: conversation?.file || null,
+    mtimeMs: conversation?.mtimeMs || null,
+    stepCount: Math.max(1, transcript.stepCount || Math.round((conversation?.size || 0) / 360000)),
+  };
 }
 
 function timeMessage(mtimeMs) {
@@ -182,29 +372,7 @@ function missingSummaryIds(area) {
 function buildMissingSummaryPlan(area, id) {
   const { conversations, summaries, ids } = missingSummaryIds(area);
   const targetIds = id ? ids.filter((item) => item === id) : ids;
-  const items = targetIds.map((cid) => {
-    const conversation = conversations.get(cid);
-    const brainDir = path.join(area.geminiDir, 'brain', cid);
-    const title = titleFromBrain(brainDir);
-    const workspaceUri = projectRootFromUris(urisFromBrain(brainDir));
-    const project = findProjectForUri(area.projectsDir, workspaceUri);
-    const reasons = [];
-    if (!conversation) reasons.push('conversation file not found');
-    if (!fs.existsSync(brainDir)) reasons.push('brain directory not found');
-    if (!title) reasons.push('cannot infer title from brain markdown');
-    if (!workspaceUri) reasons.push('cannot infer workspace URI from brain markdown');
-    return {
-      cid,
-      canRepair: reasons.length === 0,
-      reasons,
-      title,
-      workspaceUri,
-      project,
-      file: conversation?.file || null,
-      mtimeMs: conversation?.mtimeMs || null,
-      stepCount: Math.max(1, Math.round((conversation?.size || 0) / 360000)),
-    };
-  });
+  const items = targetIds.map((cid) => planMissingItem(area, cid, conversations));
   return {
     generatedAt: new Date().toISOString(),
     area: { id: area.area, label: area.label },
@@ -229,7 +397,17 @@ function applyMissingSummaryRepair(flags = {}) {
     skippedCount: plan.skippedCount,
     repairedCount: 0,
     backups: { agyhub: null, state: null, stateMirror: null },
-    items: plan.items.map(({ cid, canRepair, reasons, title, workspaceUri, project }) => ({ cid, canRepair, reasons, title, workspaceUri, project })),
+    items: plan.items.map(({ cid, canRepair, reasons, title, workspaceUri, project, repairStrategy, confidence, evidence }) => ({
+      cid,
+      canRepair,
+      reasons,
+      title,
+      workspaceUri,
+      project,
+      repairStrategy,
+      confidence,
+      evidence,
+    })),
   };
   if (!flags.apply || repairable.length === 0) return result;
 
