@@ -58,7 +58,7 @@ node agy_ide_fix_tool/src/cli.js sync apply --bidirectional --apply
 
 ```bash
 cd agy_ide_fix_tool/macos_tray
-AGY_FIX_TOOL_ROOT=/Users/maemolee/GitHub/antigravity-projects-fix/agy_ide_fix_tool swift run --scratch-path /tmp/agy-session-tray-build AgySessionTray
+AGY_FIX_TOOL_ROOT=/Users/maemolee/GitHub/antigravity-projects-fix/agy_ide_fix_tool swift run --scratch-path /tmp/antigravity-migrator-build AntigravityMigrator
 ```
 
 打包成 `.app`：
@@ -66,10 +66,10 @@ AGY_FIX_TOOL_ROOT=/Users/maemolee/GitHub/antigravity-projects-fix/agy_ide_fix_to
 ```bash
 cd agy_ide_fix_tool/macos_tray
 ./build_app.sh
-open dist/AgySessionTray.app
+open dist/AntigravityMigrator.app
 ```
 
-生成的 `dist/AgySessionTray.app` 可以拖到 `/Applications`，也可以打开后在 Dock 里选择保留。
+生成的 `dist/AntigravityMigrator.app` 可以拖到 `/Applications`，也可以打开后在 Dock 里选择保留。
 
 如果在受限沙盒里运行脚本遇到 `sandbox-exec` 权限错误，请在 macOS 终端中直接执行同一条命令。
 
@@ -82,10 +82,10 @@ open dist/AgySessionTray.app
 - 显示同 ID 会话文件差异和可自动处理数量。
 - 手动点击双向同步。
 - 同步前会请求确认，然后退出 Antigravity 和 Antigravity IDE，确认退出后才写入。
-- 记录最后同步时间到 `~/Library/Application Support/AgySessionTray/state.json`。
-- 同步日志写到 `~/Library/Application Support/AgySessionTray/sync.log`。
-- 覆盖备份写到 `~/Library/Application Support/AgySessionTray/backups/`。
-- 无法证明谁更完整的同 ID 差异会复制到 `~/Library/Application Support/AgySessionTray/conflicts/`，不会覆盖原文件。
+- 记录最后同步时间到 `~/Library/Application Support/AntigravityMigrator/state.json`。
+- 同步日志写到 `~/Library/Application Support/AntigravityMigrator/sync.log`。
+- 覆盖备份写到 `~/Library/Application Support/AntigravityMigrator/backups/`。
+- 无法证明谁更完整的同 ID 差异会复制到 `~/Library/Application Support/AntigravityMigrator/conflicts/`，不会覆盖原文件。
 
 菜单栏工具调用 Node CLI：
 

@@ -3,16 +3,16 @@
 import PackageDescription
 
 let package = Package(
-    name: "AgySessionTray",
+    name: "AntigravityMigrator",
     platforms: [
         .macOS(.v13)
     ],
     products: [
-        .executable(name: "AgySessionTray", targets: ["AgySessionTray"])
+        .executable(name: "AntigravityMigrator", targets: ["AntigravityMigrator"])
     ],
     targets: [
         .executableTarget(
-            name: "AgySessionTray"
+            name: "AntigravityMigrator"
         )
     ]
 )

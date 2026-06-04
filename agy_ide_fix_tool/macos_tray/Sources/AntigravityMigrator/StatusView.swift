@@ -134,19 +134,19 @@ final class StatusViewModel: ObservableObject {
     var logURL: URL {
         FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("AgySessionTray/sync.log")
+            .appendingPathComponent("AntigravityMigrator/sync.log")
     }
 
     var backupsURL: URL {
         FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("AgySessionTray/backups", isDirectory: true)
+            .appendingPathComponent("AntigravityMigrator/backups", isDirectory: true)
     }
 
     var conflictsURL: URL {
         FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("AgySessionTray/conflicts", isDirectory: true)
+            .appendingPathComponent("AntigravityMigrator/conflicts", isDirectory: true)
     }
 
     init() {
@@ -165,7 +165,7 @@ final class StatusViewModel: ObservableObject {
         defer { isBusy = false }
         do {
             guard let runner else {
-                throw NSError(domain: "AgySessionTray", code: 2, userInfo: [NSLocalizedDescriptionKey: "找不到 agy_ide_fix_tool/src/cli.js"])
+                throw NSError(domain: "AntigravityMigrator", code: 2, userInfo: [NSLocalizedDescriptionKey: "找不到 agy_ide_fix_tool/src/cli.js"])
             }
             try await loadReports(runner: runner)
             errorMessage = nil
@@ -191,11 +191,11 @@ final class StatusViewModel: ObservableObject {
         defer { isBusy = false }
         do {
             guard let runner else {
-                throw NSError(domain: "AgySessionTray", code: 2, userInfo: [NSLocalizedDescriptionKey: "找不到 agy_ide_fix_tool/src/cli.js"])
+                throw NSError(domain: "AntigravityMigrator", code: 2, userInfo: [NSLocalizedDescriptionKey: "找不到 agy_ide_fix_tool/src/cli.js"])
             }
             let closed = await AppCloser.closeAndWait()
             guard closed else {
-                throw NSError(domain: "AgySessionTray", code: 1, userInfo: [NSLocalizedDescriptionKey: "Antigravity 或 Antigravity IDE 未能在 20 秒内退出，同步已取消。"])
+                throw NSError(domain: "AntigravityMigrator", code: 1, userInfo: [NSLocalizedDescriptionKey: "Antigravity 或 Antigravity IDE 未能在 20 秒内退出，同步已取消。"])
             }
 
             let result = try await runner.bidirectionalSync()
@@ -228,11 +228,11 @@ final class StatusViewModel: ObservableObject {
         defer { isBusy = false }
         do {
             guard let runner else {
-                throw NSError(domain: "AgySessionTray", code: 2, userInfo: [NSLocalizedDescriptionKey: "找不到 agy_ide_fix_tool/src/cli.js"])
+                throw NSError(domain: "AntigravityMigrator", code: 2, userInfo: [NSLocalizedDescriptionKey: "找不到 agy_ide_fix_tool/src/cli.js"])
             }
             let closed = await AppCloser.closeAndWait()
             guard closed else {
-                throw NSError(domain: "AgySessionTray", code: 1, userInfo: [NSLocalizedDescriptionKey: "Antigravity 或 Antigravity IDE 未能在 20 秒内退出，修复已取消。"])
+                throw NSError(domain: "AntigravityMigrator", code: 1, userInfo: [NSLocalizedDescriptionKey: "Antigravity 或 Antigravity IDE 未能在 20 秒内退出，修复已取消。"])
             }
 
             let agRepair = try await runner.repairState(area: "ag")
@@ -267,11 +267,11 @@ final class StatusViewModel: ObservableObject {
         defer { isBusy = false }
         do {
             guard let runner else {
-                throw NSError(domain: "AgySessionTray", code: 2, userInfo: [NSLocalizedDescriptionKey: "找不到 agy_ide_fix_tool/src/cli.js"])
+                throw NSError(domain: "AntigravityMigrator", code: 2, userInfo: [NSLocalizedDescriptionKey: "找不到 agy_ide_fix_tool/src/cli.js"])
             }
             let closed = await AppCloser.closeAndWait()
             guard closed else {
-                throw NSError(domain: "AgySessionTray", code: 1, userInfo: [NSLocalizedDescriptionKey: "Antigravity 或 Antigravity IDE 未能在 20 秒内退出，归属修复已取消。"])
+                throw NSError(domain: "AntigravityMigrator", code: 1, userInfo: [NSLocalizedDescriptionKey: "Antigravity 或 Antigravity IDE 未能在 20 秒内退出，归属修复已取消。"])
             }
 
             let agProjectRepair = try await runner.repairProjects(area: "ag")
@@ -434,7 +434,7 @@ struct DashboardView: View {
                 .frame(width: 34)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Antigravity Sessions")
+                Text("AntigravityMigrator")
                     .font(.title2.weight(.semibold))
                 Text("最后同步：\(viewModel.lastSyncText)")
                     .font(.callout)
@@ -460,7 +460,7 @@ struct MenuStatusView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Antigravity Sessions")
+                    Text("AntigravityMigrator")
                         .font(.headline)
                     Text(viewModel.overallStatus.title)
                         .font(.caption)

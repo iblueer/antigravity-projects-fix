@@ -3,13 +3,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TOOL_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-BUILD_DIR="${BUILD_DIR:-/tmp/agy-session-tray-build}"
-CACHE_DIR="${CACHE_DIR:-/tmp/agy-session-tray-cache}"
-APP_DIR="$SCRIPT_DIR/dist/AgySessionTray.app"
+BUILD_DIR="${BUILD_DIR:-/tmp/antigravity-migrator-build}"
+CACHE_DIR="${CACHE_DIR:-/tmp/antigravity-migrator-cache}"
+APP_NAME="AntigravityMigrator"
+APP_DIR="$SCRIPT_DIR/dist/$APP_NAME.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 ICON_SOURCE="$SCRIPT_DIR/Resources/AppIcon.png"
+ICON_ICNS_SOURCE="$SCRIPT_DIR/Resources/AppIcon.icns"
 ICONSET_DIR="$BUILD_DIR/AppIcon.iconset"
 ICON_FILE="$RESOURCES_DIR/AppIcon.icns"
 
@@ -24,10 +26,12 @@ swift build \
 
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
-cp "$BUILD_DIR/release/AgySessionTray" "$MACOS_DIR/AgySessionTray"
-chmod +x "$MACOS_DIR/AgySessionTray"
+cp "$BUILD_DIR/release/$APP_NAME" "$MACOS_DIR/$APP_NAME"
+chmod +x "$MACOS_DIR/$APP_NAME"
 
-if [[ -f "$ICON_SOURCE" ]]; then
+if [[ -f "$ICON_ICNS_SOURCE" ]]; then
+  cp "$ICON_ICNS_SOURCE" "$ICON_FILE"
+elif [[ -f "$ICON_SOURCE" ]]; then
   rm -rf "$ICONSET_DIR"
   mkdir -p "$ICONSET_DIR"
   sips -z 16 16 "$ICON_SOURCE" --out "$ICONSET_DIR/icon_16x16.png" >/dev/null
@@ -49,13 +53,13 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 <plist version="1.0">
 <dict>
   <key>CFBundleExecutable</key>
-  <string>AgySessionTray</string>
+  <string>$APP_NAME</string>
   <key>CFBundleIdentifier</key>
-  <string>com.maemolee.AgySessionTray</string>
+  <string>com.maemolee.AntigravityMigrator</string>
   <key>CFBundleName</key>
-  <string>AgySessionTray</string>
+  <string>$APP_NAME</string>
   <key>CFBundleDisplayName</key>
-  <string>Antigravity Sessions</string>
+  <string>$APP_NAME</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundlePackageType</key>

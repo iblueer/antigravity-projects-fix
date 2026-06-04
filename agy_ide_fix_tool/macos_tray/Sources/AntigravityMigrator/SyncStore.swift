@@ -5,7 +5,7 @@ struct SyncStore {
 
     init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dir = appSupport.appendingPathComponent("AgySessionTray", isDirectory: true)
+        let dir = appSupport.appendingPathComponent("AntigravityMigrator", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         fileURL = dir.appendingPathComponent("state.json")
     }

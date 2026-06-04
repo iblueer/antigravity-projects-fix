@@ -62,12 +62,12 @@ struct WindowSizeEnforcer: NSViewRepresentable {
 }
 
 @main
-struct AgySessionTrayApp: App {
+struct AntigravityMigratorApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var viewModel = StatusViewModel()
 
     var body: some Scene {
-        WindowGroup("Antigravity Sessions", id: "main") {
+        WindowGroup("AntigravityMigrator", id: "main") {
             DashboardView()
                 .environmentObject(viewModel)
                 .frame(minWidth: 780, idealWidth: 860, minHeight: 620, idealHeight: 648)

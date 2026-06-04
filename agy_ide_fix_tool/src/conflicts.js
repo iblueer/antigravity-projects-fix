@@ -9,7 +9,7 @@ const { encodeBytes, encodeVarint, readVarint, parseFields } = require('./protob
 
 function appSupportDir() {
   if (process.env.AGY_SESSION_TRAY_DIR) return process.env.AGY_SESSION_TRAY_DIR;
-  return path.join(os.homedir(), 'Library', 'Application Support', 'AgySessionTray');
+  return path.join(os.homedir(), 'Library', 'Application Support', 'AntigravityMigrator');
 }
 
 function ensureDir(dir) {

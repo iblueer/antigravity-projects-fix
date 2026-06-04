@@ -265,7 +265,7 @@ sidebarWorkspaces 继续来自 `syncPlan.counts.sidebarWorkspacesMissingInAg / s
 
 ## 验收标准
 
-1. `swift build --scratch-path /tmp/agy-session-tray-build` 通过。
+1. `swift build --scratch-path /tmp/antigravity-migrator-build` 通过。
 2. `./build.sh` 通过。
 3. 主界面有 `Session 归属` 面板。
 4. `修复归属` 按钮可见，点击不弹二次确认。
@@ -286,5 +286,5 @@ sidebarWorkspaces 继续来自 `syncPlan.counts.sidebarWorkspacesMissingInAg / s
 - `修复 Session` 也不弹确认。
 - `双向同步` 保留确认。
 - 不要改无关文件。
-- 完成后运行 `swift build --scratch-path /tmp/agy-session-tray-build`。
+- 完成后运行 `swift build --scratch-path /tmp/antigravity-migrator-build`。
 - 不要提交，由 Codex 验收后提交。

@@ -248,9 +248,9 @@ Project 配置保存在 `~/.gemini/config/projects/*.json`。文件名通常是 
    - 无法判断：复制冲突副本，不覆盖原文件。
 
 6. 写日志和备份：
-   - 同步日志：`~/Library/Application Support/AgySessionTray/sync.log`
-   - 覆盖备份：`~/Library/Application Support/AgySessionTray/backups/`
-   - 无法判断的冲突副本：`~/Library/Application Support/AgySessionTray/conflicts/`
+   - 同步日志：`~/Library/Application Support/AntigravityMigrator/sync.log`
+   - 覆盖备份：`~/Library/Application Support/AntigravityMigrator/backups/`
+   - 无法判断的冲突副本：`~/Library/Application Support/AntigravityMigrator/conflicts/`
    - agyhub/state/project JSON 写入前会在原目录旁边生成备份。
 
 ## 当前限制
