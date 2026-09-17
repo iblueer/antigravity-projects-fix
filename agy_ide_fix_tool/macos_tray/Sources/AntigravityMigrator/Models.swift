@@ -176,4 +176,32 @@ struct PersistedState: Codable {
     var lastSyncAt: Date?
     var lastSyncStatus: String?
     var lastSyncMessage: String?
+    var isFusionMode: Bool
+
+    init(
+        lastSyncAt: Date? = nil,
+        lastSyncStatus: String? = nil,
+        lastSyncMessage: String? = nil,
+        isFusionMode: Bool = false
+    ) {
+        self.lastSyncAt = lastSyncAt
+        self.lastSyncStatus = lastSyncStatus
+        self.lastSyncMessage = lastSyncMessage
+        self.isFusionMode = isFusionMode
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case lastSyncAt
+        case lastSyncStatus
+        case lastSyncMessage
+        case isFusionMode
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        lastSyncAt = try container.decodeIfPresent(Date.self, forKey: .lastSyncAt)
+        lastSyncStatus = try container.decodeIfPresent(String.self, forKey: .lastSyncStatus)
+        lastSyncMessage = try container.decodeIfPresent(String.self, forKey: .lastSyncMessage)
+        isFusionMode = try container.decodeIfPresent(Bool.self, forKey: .isFusionMode) ?? false
+    }
 }

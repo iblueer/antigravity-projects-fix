@@ -58,6 +58,10 @@ final class StatusViewModel: ObservableObject {
         if isBusy { return .loading }
         if errorMessage != nil { return .error }
         guard let doctor else { return .loading }
+        if persisted.isFusionMode {
+            guard fusionSummaryStatus != nil else { return .loading }
+            return isFusionSummaryAligned ? .healthy : .warning
+        }
         if !doctor.areas.allSatisfy(\.healthy) { return .warning }
         if attributionIssueCount > 0 { return .warning }
         if pendingOverwriteCount > 0 || pendingForkCount > 0 { return .warning }
@@ -125,6 +129,32 @@ final class StatusViewModel: ObservableObject {
 
     var canRepair: Bool { repairDisabledReason == nil }
     var canRepairAttribution: Bool { repairDisabledReason == nil }
+    var repairButtonTitle: String { persisted.isFusionMode ? "刷新 Summary" : "修复 Session" }
+
+    var isFusionSummaryAligned: Bool {
+        guard let status = fusionSummaryStatus else { return false }
+        return status.missingFromState == 0 && status.staleInState == 0
+    }
+
+    var fusionSummaryStatus: (hubSummaryCount: Int, ideStateCount: Int, missingFromState: Int, staleInState: Int)? {
+        guard let ideArea else { return nil }
+        return (
+            hubSummaryCount: ideArea.counts.agyhubSummaries,
+            ideStateCount: ideArea.counts.stateSummaries,
+            missingFromState: ideArea.counts.agyhubMissingFromState,
+            staleInState: ideArea.counts.stateMissingFromAgyhub
+        )
+    }
+
+    var fusionStatusTitle: String {
+        guard fusionSummaryStatus != nil else { return "读取中" }
+        return isFusionSummaryAligned ? "已对齐" : "需刷新"
+    }
+
+    var fusionStatusColor: Color {
+        guard fusionSummaryStatus != nil else { return .blue }
+        return isFusionSummaryAligned ? .green : .orange
+    }
 
     var lastSyncText: String {
         guard let last = persisted.lastSyncAt else { return "无记录" }
@@ -157,6 +187,11 @@ final class StatusViewModel: ObservableObject {
             runner = nil
             errorMessage = error.localizedDescription
         }
+    }
+
+    func setFusionMode(_ enabled: Bool) {
+        persisted.isFusionMode = enabled
+        store.save(persisted)
     }
 
     func refresh() async {
@@ -242,15 +277,23 @@ final class StatusViewModel: ObservableObject {
             try await loadReports(runner: runner)
             persisted.lastSyncAt = Date()
             persisted.lastSyncStatus = "success"
-            persisted.lastSyncMessage = repairMessage(
-                ag: agRepair,
-                ide: ideRepair,
-                agSummary: agSummaryRepair,
-                ideSummary: ideSummaryRepair
-            )
+            if persisted.isFusionMode {
+                persisted.lastSyncMessage = fusionRepairMessage(ide: ideRepair, ideSummary: ideSummaryRepair)
+            } else {
+                persisted.lastSyncMessage = repairMessage(
+                    ag: agRepair,
+                    ide: ideRepair,
+                    agSummary: agSummaryRepair,
+                    ideSummary: ideSummaryRepair
+                )
+            }
             store.save(persisted)
             errorMessage = nil
-            notifyIfUnhealthy()
+            if persisted.isFusionMode {
+                notifyIfFusionUnaligned()
+            } else {
+                notifyIfUnhealthy()
+            }
         } catch {
             persisted.lastSyncAt = Date()
             persisted.lastSyncStatus = "failed"
@@ -328,6 +371,14 @@ final class StatusViewModel: ObservableObject {
         notify(title: "仍有 Session 索引问题", body: details)
     }
 
+    private func notifyIfFusionUnaligned() {
+        guard let status = fusionSummaryStatus, !isFusionSummaryAligned else { return }
+        notify(
+            title: "Summary 仍未对齐",
+            body: "未入界面索引 \(status.missingFromState)，界面残留 \(status.staleInState)"
+        )
+    }
+
     private func notify(title: String, body: String) {
         let content = UNMutableNotificationContent()
         content.title = title
@@ -362,6 +413,23 @@ final class StatusViewModel: ObservableObject {
         return parts.joined(separator: "，")
     }
 
+    private func fusionRepairMessage(ide: RepairResult, ideSummary: SummaryRepairResult) -> String {
+        let fixed = ide.missingCount + ide.staleCount
+        let summaries = ideSummary.repairedCount
+        let skipped = ideSummary.skippedCount
+        let remaining = fusionSummaryStatus.map { $0.missingFromState + $0.staleInState } ?? 0
+        if fixed + summaries == 0 {
+            if skipped > 0 { return "Summary 检查完成；\(skipped) 条缺失 summary 缺少可用 brain 信息，未写入" }
+            return remaining == 0 ? "Summary 已对齐" : "Summary 检查完成；仍有 \(remaining) 个问题"
+        }
+        var parts = ["Summary 刷新完成"]
+        if fixed > 0 { parts.append("界面索引 \(fixed) 项") }
+        if summaries > 0 { parts.append("历史 summary \(summaries) 条") }
+        if skipped > 0 { parts.append("跳过 \(skipped) 条") }
+        if remaining > 0 { parts.append("仍有 \(remaining) 个问题") }
+        return parts.joined(separator: "，")
+    }
+
     private func repairAttributionMessage(prefix: String?, agProject: ProjectRepairResult, ideProject: ProjectRepairResult) -> String {
         let projectSummaries = agProject.summariesUpdated + ideProject.summariesUpdated
         let projectsCreated = agProject.projectsCreated + ideProject.projectsCreated
@@ -388,29 +456,34 @@ struct DashboardView: View {
         VStack(spacing: 0) {
             dashboardHeader
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    OverviewStrip()
+            if viewModel.persisted.isFusionMode {
+                FusionDashboardContent()
+                FusionActionBar()
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        OverviewStrip()
 
-                    HStack(alignment: .top, spacing: 14) {
-                        ProductStatusPanel(title: "Antigravity", area: viewModel.agArea)
-                        ProductStatusPanel(title: "Antigravity IDE", area: viewModel.ideArea)
+                        HStack(alignment: .top, spacing: 14) {
+                            ProductStatusPanel(title: "Antigravity", area: viewModel.agArea)
+                            ProductStatusPanel(title: "Antigravity IDE", area: viewModel.ideArea)
+                        }
+
+                        SessionAttributionPanel()
+
+                        SyncPlanPanel()
+
+                        if let error = viewModel.errorMessage {
+                            MessagePanel(title: "错误", message: error, color: .red)
+                        } else if let message = viewModel.persisted.lastSyncMessage, !message.isEmpty {
+                            MessagePanel(title: "最近结果", message: message, color: viewModel.persisted.lastSyncStatus == "failed" ? .red : .secondary)
+                        }
                     }
-
-                    SessionAttributionPanel()
-
-                    SyncPlanPanel()
-
-                    if let error = viewModel.errorMessage {
-                        MessagePanel(title: "错误", message: error, color: .red)
-                    } else if let message = viewModel.persisted.lastSyncMessage, !message.isEmpty {
-                        MessagePanel(title: "最近结果", message: message, color: viewModel.persisted.lastSyncStatus == "failed" ? .red : .secondary)
-                    }
+                    .padding(16)
                 }
-                .padding(16)
-            }
 
-            ActionBar(showSyncConfirmation: $showSyncConfirmation)
+                ActionBar(showSyncConfirmation: $showSyncConfirmation)
+            }
         }
         .background(.background)
         .alert("开始双向同步？", isPresented: $showSyncConfirmation) {
@@ -436,12 +509,22 @@ struct DashboardView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("AntigravityMigrator")
                     .font(.title2.weight(.semibold))
-                Text("最后同步：\(viewModel.lastSyncText)")
+                Text(viewModel.persisted.isFusionMode ? "融合模式" : "最后同步：\(viewModel.lastSyncText)")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
 
             Spacer()
+
+            Picker("模式", selection: Binding(
+                get: { viewModel.persisted.isFusionMode },
+                set: { viewModel.setFusionMode($0) }
+            )) {
+                Text("标准").tag(false)
+                Text("融合").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 136)
 
             StatusPill(title: viewModel.overallStatus.title, color: viewModel.overallStatus.color)
         }
@@ -462,7 +545,7 @@ struct MenuStatusView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("AntigravityMigrator")
                         .font(.headline)
-                    Text(viewModel.overallStatus.title)
+                    Text(viewModel.persisted.isFusionMode ? "融合模式" : viewModel.overallStatus.title)
                         .font(.caption)
                         .foregroundStyle(viewModel.overallStatus.color)
                 }
@@ -472,49 +555,72 @@ struct MenuStatusView: View {
                     .foregroundStyle(viewModel.overallStatus.color)
             }
 
-            HStack(spacing: 10) {
-                MiniMetric(title: "AG", value: viewModel.agSessionCount)
-                MiniMetric(title: "IDE", value: viewModel.ideSessionCount)
-                MiniMetric(title: "覆盖", value: viewModel.pendingOverwriteCount)
-                MiniMetric(title: "分叉", value: viewModel.pendingForkCount)
+            Picker("模式", selection: Binding(
+                get: { viewModel.persisted.isFusionMode },
+                set: { viewModel.setFusionMode($0) }
+            )) {
+                Text("标准").tag(false)
+                Text("融合").tag(true)
             }
+            .pickerStyle(.segmented)
 
-            Text("最后同步：\(viewModel.lastSyncText)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            if viewModel.persisted.isFusionMode {
+                FusionSummaryCompactStatus()
+            } else {
+                HStack(spacing: 10) {
+                    MiniMetric(title: "AG", value: viewModel.agSessionCount)
+                    MiniMetric(title: "IDE", value: viewModel.ideSessionCount)
+                    MiniMetric(title: "覆盖", value: viewModel.pendingOverwriteCount)
+                    MiniMetric(title: "分叉", value: viewModel.pendingForkCount)
+                }
+
+                Text("最后同步：\(viewModel.lastSyncText)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
             Divider()
 
-            HStack {
-                Button {
-                    Task { await viewModel.refresh() }
-                } label: {
-                    Label("刷新", systemImage: "arrow.clockwise")
-                }
-                .disabled(viewModel.isBusy)
-
+            if viewModel.persisted.isFusionMode {
                 Button {
                     Task { await viewModel.repairIndexes() }
                 } label: {
-                    Label("修复 Session", systemImage: "wrench.and.screwdriver")
+                    Label(viewModel.repairButtonTitle, systemImage: "arrow.clockwise")
                 }
+                .buttonStyle(.borderedProminent)
                 .disabled(!viewModel.canRepair)
+            } else {
+                HStack {
+                    Button {
+                        Task { await viewModel.refresh() }
+                    } label: {
+                        Label("刷新", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(viewModel.isBusy)
 
-                Button {
-                    Task { await viewModel.repairAttribution() }
-                } label: {
-                    Label("修复归属", systemImage: "folder.badge.gearshape")
+                    Button {
+                        Task { await viewModel.repairIndexes() }
+                    } label: {
+                        Label(viewModel.repairButtonTitle, systemImage: "wrench.and.screwdriver")
+                    }
+                    .disabled(!viewModel.canRepair)
+
+                    Button {
+                        Task { await viewModel.repairAttribution() }
+                    } label: {
+                        Label("修复归属", systemImage: "folder.badge.gearshape")
+                    }
+                    .disabled(!viewModel.canRepairAttribution)
+
+                    Spacer()
+
+                    Button {
+                        showSyncConfirmation = true
+                    } label: {
+                        Label("同步", systemImage: "arrow.left.arrow.right")
+                    }
+                    .disabled(!viewModel.canSync)
                 }
-                .disabled(!viewModel.canRepairAttribution)
-
-                Spacer()
-
-                Button {
-                    showSyncConfirmation = true
-                } label: {
-                    Label("同步", systemImage: "arrow.left.arrow.right")
-                }
-                .disabled(!viewModel.canSync)
             }
 
             HStack {
@@ -560,6 +666,84 @@ struct OverviewStrip: View {
     private var syncIssueCount: Int { viewModel.pendingOverwriteCount + viewModel.pendingForkCount }
     private var pendingTotal: Int { syncIssueCount + viewModel.attributionIssueCount }
     private var pendingColor: Color { pendingTotal == 0 ? .green : .orange }
+}
+
+struct FusionDashboardContent: View {
+    @EnvironmentObject private var viewModel: StatusViewModel
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                FusionSummaryPanel()
+
+                if let error = viewModel.errorMessage {
+                    MessagePanel(title: "错误", message: error, color: .red)
+                } else if let message = viewModel.persisted.lastSyncMessage, !message.isEmpty {
+                    MessagePanel(title: "最近结果", message: message, color: viewModel.persisted.lastSyncStatus == "failed" ? .red : .secondary)
+                }
+            }
+            .padding(16)
+        }
+    }
+}
+
+struct FusionSummaryPanel: View {
+    @EnvironmentObject private var viewModel: StatusViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 12) {
+                Image(systemName: viewModel.isFusionSummaryAligned ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .font(.system(size: 28, weight: .semibold))
+                    .foregroundStyle(viewModel.fusionStatusColor)
+                    .frame(width: 34)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("IDE trajectorySummaries")
+                        .font(.headline)
+                    Text("对齐 AGY hub summary")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                StatusPill(title: viewModel.fusionStatusTitle, color: viewModel.fusionStatusColor)
+            }
+
+            MetricsGrid(rows: [
+                ("AGY hub summary", viewModel.fusionSummaryStatus?.hubSummaryCount ?? 0),
+                ("IDE trajectorySummaries", viewModel.fusionSummaryStatus?.ideStateCount ?? 0),
+                ("未入界面索引", viewModel.fusionSummaryStatus?.missingFromState ?? 0),
+                ("界面残留", viewModel.fusionSummaryStatus?.staleInState ?? 0)
+            ], columns: 2)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+struct FusionSummaryCompactStatus: View {
+    @EnvironmentObject private var viewModel: StatusViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Summary")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                StatusPill(title: viewModel.fusionStatusTitle, color: viewModel.fusionStatusColor)
+            }
+
+            HStack(spacing: 10) {
+                MiniMetric(title: "hub", value: viewModel.fusionSummaryStatus?.hubSummaryCount ?? 0)
+                MiniMetric(title: "IDE", value: viewModel.fusionSummaryStatus?.ideStateCount ?? 0)
+                MiniMetric(title: "缺", value: viewModel.fusionSummaryStatus?.missingFromState ?? 0)
+                MiniMetric(title: "残留", value: viewModel.fusionSummaryStatus?.staleInState ?? 0)
+            }
+        }
+    }
 }
 
 struct ProductStatusPanel: View {
@@ -784,6 +968,35 @@ struct ActionBar: View {
             Button("退出") {
                 NSApp.terminate(nil)
             }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
+        .background(.bar)
+    }
+}
+
+struct FusionActionBar: View {
+    @EnvironmentObject private var viewModel: StatusViewModel
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Spacer()
+
+            if let reason = viewModel.repairDisabledReason {
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Button {
+                Task { await viewModel.repairIndexes() }
+            } label: {
+                Label(viewModel.isBusy ? "刷新中" : viewModel.repairButtonTitle, systemImage: "arrow.clockwise")
+                    .frame(minWidth: 124)
+            }
+            .keyboardShortcut("r", modifiers: [.command])
+            .buttonStyle(.borderedProminent)
+            .disabled(!viewModel.canRepair)
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 10)
